@@ -1,0 +1,13 @@
+{
+  "schema": "comsect1.reference_toolchain_pin.v1",
+  "native_c": {
+    "toolchain": "llvm",
+    "version": "19.1.4",
+    "bundle": "llvm_resource_19.1.4",
+    "release_tag": "llvmorg-19.1.4",
+    "archive_name": "clang+llvm-19.1.4-x86_64-pc-windows-msvc.tar.xz",
+    "archive_sha256": "5e965a1281c9df1fda8eddab3752ee6a3139e36ce469537f216cd938c498e6c3",
+    "provenance": "provenance.json",
+    "provenance_sha256": "0c30cc3e103f4cf2c70f62aa48d45bacd6187581b5d122e5dfd28df37bbb5eb5"
+  }
+}

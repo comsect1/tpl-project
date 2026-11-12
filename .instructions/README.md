@@ -9,6 +9,7 @@ Comsect1 Specification law.
 - [development-feedback-and-release-evidence.md](./development-feedback-and-release-evidence.md): fast feedback, release-only evidence, and disposable cache boundary
 - [build-optimization.md](./build-optimization.md): measured build speed, the shared object cache, parallel compilation, determinism and flag rules of the C build tools
 - [consumed-dependencies.md](./consumed-dependencies.md): no consumer locks; pins and digests are recorded metadata; floors and interface negotiation only
+- [reference-toolchain.md](./reference-toolchain.md): the one synchronized toolchain pin, the one reference tools location rule, and C23 as the only C standard
 - [temporary-output-and-cleanup.md](./temporary-output-and-cleanup.md): disposable output safety boundary
 - [fork-adoption.md](./fork-adoption.md): mandatory identity and tailoring checklist of a template-derived repository
 - [licensing-policy.md](./licensing-policy.md): template, downstream, and third-party license boundaries

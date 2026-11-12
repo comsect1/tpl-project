@@ -58,7 +58,8 @@ REPO_ROOT = process.REPO_ROOT
 RUN_ID_PATTERN = process.RUN_ID_PATTERN
 # One lowercase word: a Cell name and each segment of a Cell path.
 NAME_PATTERN = re.compile(r"[a-z][a-z0-9]{0,31}")
-STANDARD_PATTERN = re.compile(r"c[0-9]{2}")
+# The one ISO C edition of every Cell (owner rule 2026-11-02: all native code is C23).
+STANDARD_PATTERN = re.compile(r"c23")
 EDITION_PATTERN = re.compile(r"20[0-9]{2}")
 
 CELL_KEYS = {"path", "standard", "definitions", "include_roots", "depends_on", "freestanding", "targets"}
@@ -152,7 +153,7 @@ class Cell:
                  % (name, self.path, name, name))
         self.standard = entry["standard"]
         _require(isinstance(self.standard, str) and STANDARD_PATTERN.fullmatch(self.standard) is not None,
-                 "Cell %s: standard %r is not like c23" % (name, self.standard))
+                 "Cell %s: standard %r is not c23 (every Cell is C23)" % (name, self.standard))
         self.definitions = entry["definitions"]
         _require(isinstance(self.definitions, dict)
                  and all(isinstance(k, str) and isinstance(v, str) for k, v in self.definitions.items()),

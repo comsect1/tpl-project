@@ -112,6 +112,7 @@
 - [Temporary output and cleanup](./.instructions/temporary-output-and-cleanup.md)
 - [Build optimization](./.instructions/build-optimization.md)
 - [Consumed dependencies](./.instructions/consumed-dependencies.md)
+- [Reference toolchain](./.instructions/reference-toolchain.md)
 - [Template adoption](./.instructions/fork-adoption.md)
 - [Licensing policy](./.instructions/licensing-policy.md)
 - [Refactoring and updates](./.instructions/refactoring-and-updates.md)

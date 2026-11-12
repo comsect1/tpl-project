@@ -8,8 +8,7 @@
       "native_input": "comsect1-native-input.exe",
       "c_frontend": "comsect1-c-frontend.exe",
       "libclang": "libclang.dll"
-    },
-    "frontend_standards": ["c99", "c11", "c17", "c23"]
+    }
   },
   "expected_sha256": {
     "gate": "237d371127a62507b26d9c0da007396e51fa4a85e2f33e0902473c5e04009856",
@@ -27,15 +26,6 @@
     "include_roots": ["."],
     "external_include_roots": [],
     "system_include_roots": []
-  },
-  "clang_resource": {
-    "resource_dir": null,
-    "required_major": "19",
-    "clang_candidates": [
-      "%ANDROID_NDK_HOME%/toolchains/llvm/prebuilt/windows-x86_64/bin/clang.exe",
-      "%LOCALAPPDATA%/Android/Sdk/ndk/*/toolchains/llvm/prebuilt/windows-x86_64/bin/clang.exe",
-      "clang"
-    ]
   },
   "timeouts_seconds": {
     "clang": 60,

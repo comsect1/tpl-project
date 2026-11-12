@@ -125,7 +125,7 @@ MSVC_ROOTS = [r"C:\Program Files\Microsoft Visual Studio", r"C:\Program Files (x
 ASAN_RUNTIME = "clang_rt.asan_dynamic-x86_64.dll"
 MSVC_WARNING_FLAGS = ["/W4", "/WX"]
 # The cl spelling of a registry standard: cl has no /std:c23 and selects C23 as /std:clatest.
-MSVC_STANDARD_FLAGS = {"c11": "/std:c11", "c17": "/std:c17", "c23": "/std:clatest"}
+MSVC_STANDARD_FLAGS = {"c23": "/std:clatest"}
 # Symbols MSVC emits as external COMDAT in every unit that uses them (string literals, float constants,
 # ASan bookkeeping); they are merged by the linker and are not definitions of a Cell.
 MSVC_COMPILER_SYMBOL = re.compile(r"^(\?\?_C@|__real@|__xmm@|__ymm@|__asan|__odr_asan|_volmd$|\.)")
