@@ -49,7 +49,10 @@ def derived_config(cell, target):
     # An adopted external header tree (external_headers, a firmware kernel) is read through system
     # include roots, like the Windows SDK, for the Gate's core; its configuration folder in this
     # repository is an external include root. A Cell that adopts the fnd-sdk-standard reads
-    # comsect1_provider.h of the Foundation checkout, an external input like the Windows SDK headers.
+    # comsect1_provider.h of the Foundation checkout through a system include root as well, the same
+    # -isystem search the host and cross builds use. Either checkout is a declared dependency: outside
+    # this repository (an override) or a submodule below 10_pkg/deps/, which native_gate admits as the
+    # only in-repository system root; its files are external inputs, never governed by the Cell.
     external, configs = [], []
     if cell.external_headers is not None:
         external, configs = cell.external_roots(cell.external_headers["gate_core"])

@@ -33,19 +33,27 @@ consumer, and a runtime engine admitting a Provider library, do not refuse on:
 
 A pin file (`10_pkg/components/*.json`) names the repository a dependency
 comes from, the commit it was last pinned at, the variable that overrides its
-location and its in-repository path (`deps_path`, below `10_pkg/deps/`); it
-holds no local path. A content digest covers the inside of a deliverable only,
-excluding its root folder name. Both are read and recorded for debugging,
-never a condition. The C build tools resolve the Foundation root from the
-pin's `root_variable` when the environment sets it to a non-empty value,
-otherwise from its `deps_path` below the repository root, and from nothing
-else; they record `fnd_sdk_standard` (root, source `environment` or
-`deps_path`, `pinned_commit`, observed `head`, `dirty`, `matches_pin`) in
-`build_record.json` and the cross-build `summary.json`; an `external_headers`
-checkout is recorded the same way per result. The native Gate records the actual Gate binary digests beside
-the recorded `expected_sha256` (`tool_sha256_differs`) and the toolchain
-manifest, member and semantic runtime digests with every difference
-(`native_toolchain`).
+location and the path of its submodule (`deps_path`, below `10_pkg/deps/`); it
+holds no machine path outside the repository. A content digest covers the
+inside of a deliverable only, excluding its root folder name. The pinned
+commit and a digest are read and recorded for debugging, never a condition;
+`deps_path` and the override variable are resolution inputs.
+
+The C build tools resolve the Foundation root from the pin's `root_variable`
+when the environment sets it to a non-empty value, otherwise from its
+`deps_path` below the repository root, and from nothing else. `deps_path` must
+be a submodule path that `.gitmodules` lists. A checkout inside the repository
+lies below `10_pkg/deps/`, and a checkout path holds no link or reparse
+component. HEAD and the dirty state are read only from a checkout that is its
+own Git work tree (a clone, or a submodule with its `.git` file); otherwise
+the record carries a note instead. The tools record `fnd_sdk_standard` (root,
+source `environment` or `deps_path`, `pinned_commit`, observed `head`,
+`dirty`, `note`, `matches_pin`) in `build_record.json` and the cross-build
+`summary.json`; an `external_headers` checkout, found only through its
+environment variable, is recorded the same way per result. The native Gate
+records the actual Gate binary digests beside the recorded `expected_sha256`
+(`tool_sha256_differs`) and the toolchain manifest, member and semantic
+runtime digests with every difference (`native_toolchain`).
 
 The object cache keys a compile by the bytes of the headers actually read
 ([build optimization](./build-optimization.md)), so build correctness never
@@ -80,9 +88,13 @@ Metadata that cannot be read is a note in the record, never a failure.
 Owner decision 2026-11-12: a repository names another repository's location
 in exactly one declared place, and in no other file:
 
-- a Git submodule under `10_pkg/deps/<name>` for source the consumer compiles
-  or imports (a pin file under `10_pkg/components/` may describe it), or
-- an installed deliverable resolved by its install path.
+- a Git submodule under `10_pkg/deps/<name>` for source or headers the
+  consumer compiles or imports: `.gitmodules` and the gitlink are the
+  declaration. A pin file under `10_pkg/components/` may describe it; its
+  `deps_path` names the same submodule path and nothing else; or
+- an installed deliverable, found by the install location rule of its
+  product or by an environment variable the consumer names. The consumer
+  stores no install path.
 
 Source, build files, scripts, tests and current documents reach the
 dependency by a path derived from the repository's own root or by a variable
@@ -90,5 +102,13 @@ the declaration names. No file in a repository contains an absolute path that
 lies outside the repository root, nor a relative path that leaves it; paths
 inside the repository are unrestricted. A variable that overrides the
 declared location stays an override: the default comes from the declaration.
-Dated run records and issued evidence state what was run and are not
-rewritten when a location changes.
+An override may point outside the repository or at a checkout below
+`10_pkg/deps/`. A checkout below `10_pkg/deps/` is not authored content, and
+a Cell inside it is not a Cell of the consumer. Dated run records and issued
+evidence state what was run and are not rewritten when a location changes.
+
+Known open non-conformance: the maintainer tool configuration still requires
+absolute toolchain and system include locations (`compiler_bin_dir`,
+`toolchain_bin_dir`, `hosted_include_roots`). These locations are to move to
+environment or layout resolution; until then, they are the only stored paths
+outside the repository that this policy tolerates.

@@ -26,8 +26,12 @@ reads `comsect1_provider.h` of the Foundation checkout (`standard_include_root`)
 A consumed checkout (the Foundation of `host_build.standard_pin`, an adopted
 `external_headers` tree) is never locked: its pinned commit is recorded
 metadata. The Foundation is found at the pin's `root_variable` (an override) or
-else its declared `deps_path`, a Git submodule below `10_pkg/deps/`; the pin
-holds no local path. The tools resolve the checkout, read its HEAD and dirty state, record
+else its `deps_path`, the path of the Git submodule that `.gitmodules` declares
+below `10_pkg/deps/`; the pin holds no machine path outside the repository. An
+`external_headers` checkout is found only through its environment variable. A
+consumed checkout inside the repository lies below `10_pkg/deps/`, and no
+consumed checkout path holds a link or reparse component. The tools resolve the
+checkout, read its HEAD and dirty state when it is its own Git work tree, record
 them beside the pinned commit (`standard_checkout`, `Cell.external_checkout`)
 and never refuse on a mismatch or a dirty tree. The object cache keys every
 compile by the bytes of the headers actually read, so correctness never rests
@@ -58,6 +62,7 @@ from . import process
 TOOLS_ROOT = process.TOOLS_ROOT
 REPO_ROOT = process.REPO_ROOT
 RUN_ID_PATTERN = process.RUN_ID_PATTERN
+DEPS_FOLDER = process.DEPS_FOLDER
 # One lowercase word: a Cell name and each segment of a Cell path.
 NAME_PATTERN = re.compile(r"[a-z][a-z0-9]{0,31}")
 # The one ISO C edition of every Cell (owner rule 2026-11-02: all native code is C23).
@@ -74,10 +79,11 @@ RUST_CELL_KEYS = {"path", "edition", "depends_on"}
 PROVIDER_CATEGORY = "provider"
 # budget: the cross-build size budget of every cross core, in bytes of the Cell's own objects.
 BUDGET_KEYS = {"text", "data", "bss"}
-# external_headers of a Cell that adopts an external header tree (a firmware kernel), read only and
-# outside this repository: the variable naming the checkout, the commit it was pinned at (recorded
-# metadata, never a lock), the include roots of every core and of the Gate's core, and repository
-# folders of build inputs (a kernel configuration).
+# external_headers of a Cell that adopts an external header tree (a firmware kernel), read only, a
+# declared dependency reached only through its environment variable (outside this repository, or a
+# submodule below 10_pkg/deps/): the variable naming the checkout, the commit it was pinned at
+# (recorded metadata, never a lock), the include roots of every core and of the Gate's core, and
+# repository folders of build inputs (a kernel configuration).
 EXTERNAL_HEADER_KEYS = {"environment", "commit", "include_roots", "core_include_roots", "gate_core",
                         "config_roots"}
 COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
@@ -335,8 +341,9 @@ class Cell:
     def external_roots(self, core):
         """(absolute include roots of the external checkout for the core, absolute config roots).
 
-        The checkout is read only from the named environment variable and lies outside this
-        repository. Its commit and dirty state are recorded (external_checkout), never required."""
+        The checkout is read only from the named environment variable: a folder outside this
+        repository or a dependency submodule below 10_pkg/deps/ (dependency_checkout_root). Its commit
+        and dirty state are recorded (external_checkout), never required."""
         section = self.external_headers
         if section is None:
             return [], []
@@ -365,17 +372,15 @@ class Cell:
         if not checkout or not os.path.isdir(checkout):
             raise RegistryError(
                 "Cell %s: the checkout of its external headers is not found: %s is %s (pinned commit %s, "
-                "recorded metadata). Next step: set %s to a checkout outside this repository that holds %s."
+                "recorded metadata). Next step: set %s to a checkout of that header tree that holds %s (a "
+                "dependency submodule below %s/ or a folder outside this repository)."
                 % (self.name, variable, "unset" if not checkout else "%s, not a directory" % checkout,
-                   self.external_headers["commit"], variable, ", ".join(self.external_headers["include_roots"])),
+                   self.external_headers["commit"], variable, ", ".join(self.external_headers["include_roots"]),
+                   "/".join(DEPS_FOLDER)),
                 details)
-        checkout = os.path.realpath(checkout)
-        if _inside(checkout, self.settings.repo_root):
-            raise RegistryError(
-                "Cell %s: the checkout %s (from %s) lies inside this repository. Next step: point %s at a "
-                "checkout outside %s." % (self.name, checkout, variable, variable, self.settings.repo_root),
-                dict(details, root=checkout))
-        return checkout
+        return dependency_checkout_root(checkout, self.settings.repo_root,
+                                        "Cell %s: the external header checkout" % self.name,
+                                        "from %s" % variable, details)
 
     def external_checkout(self):
         """The recorded identity of the external header checkout (None without external_headers):
@@ -618,6 +623,31 @@ def _inside(path, repo_root):
         and os.path.commonpath([path, repo]) == repo
 
 
+def _same_path(first, second):
+    return os.path.normcase(os.path.realpath(first)) == os.path.normcase(os.path.realpath(second))
+
+
+def dependency_checkout_root(path, repo_root, what, found, details):
+    """The real path of a consumed checkout `path` (an existing folder) after refusing a linked or
+    reparse component on the way. Inside this repository it must lie below 10_pkg/deps/, the home of
+    declared dependency submodules; outside it, it is an override the machine supplies. `what` and
+    `found` name the checkout and how it was found in the message; `details` go into the error."""
+    try:
+        checkout = str(_guard.checked_path(path))
+    except (OSError, ValueError) as error:
+        raise RegistryError(
+            "%s %s (%s) is not usable: %s. Next step: use the checkout folder itself, not a link, junction or "
+            "reparse point to it." % (what, path, found, error), dict(details, root=path))
+    deps = os.path.join(os.path.realpath(repo_root), *DEPS_FOLDER)
+    if _inside(checkout, repo_root) and (not _inside(checkout, deps) or _same_path(checkout, deps)):
+        raise RegistryError(
+            "%s %s (%s) lies inside this repository outside %s/. Next step: add the dependency as a Git submodule "
+            "below %s/, or point the variable at a checkout outside %s."
+            % (what, checkout, found, "/".join(DEPS_FOLDER), "/".join(DEPS_FOLDER), repo_root),
+            dict(details, root=checkout))
+    return checkout
+
+
 def _git_observation(checkout, arguments):
     """The stripped output of one git query, or None when the checkout cannot answer it."""
     try:
@@ -626,42 +656,95 @@ def _git_observation(checkout, arguments):
         return None
 
 
-# Observed consumed checkouts of this process: real path -> {"head", "dirty"}. One tool process reads
-# a checkout once, not once per compiled unit.
+# Observed consumed checkouts of this process: real path -> {"head", "dirty", "note"}. One tool process
+# reads a checkout once, not once per compiled unit.
 _OBSERVED_CHECKOUTS = {}
 
 
 def observed_checkout(checkout):
-    """{"head", "dirty"} of a consumed checkout: HEAD (None when it is no git checkout) and whether it
-    holds a change or an untracked file (None when unknown). Read for the record, never a condition."""
+    """{"head", "dirty", "note"} of a consumed checkout, read for the record and never a condition.
+
+    HEAD and the dirty state (a change or an untracked file) are read only when the checkout is the top
+    level of its own Git work tree (a clone, or a submodule with its .git file): git run in a plain
+    folder inside another work tree, such as an uninitialized dependency folder of the consumer, would
+    report that tree instead. Otherwise head and dirty are None and the note says why."""
     if checkout not in _OBSERVED_CHECKOUTS:
-        head = _git_observation(checkout, ["rev-parse", "HEAD"])
-        status = _git_observation(checkout, ["status", "--porcelain=v1", "--untracked-files=all"]) \
-            if head is not None else None
-        _OBSERVED_CHECKOUTS[checkout] = {"head": head, "dirty": None if status is None else status != ""}
+        head = dirty = None
+        top = _git_observation(checkout, ["rev-parse", "--show-toplevel"])
+        if top is None:
+            note = "no Git work tree at %s: HEAD and dirty state are not read" % checkout
+        elif not _same_path(top, checkout):
+            note = ("%s is no Git work tree of its own (git finds the enclosing work tree %s): HEAD and dirty "
+                    "state are not read" % (checkout, top))
+        else:
+            head = _git_observation(checkout, ["rev-parse", "HEAD"])
+            status = _git_observation(checkout, ["status", "--porcelain=v1", "--untracked-files=all"]) \
+                if head is not None else None
+            dirty = None if status is None else status != ""
+            note = None if head is not None else "HEAD of %s is not readable" % checkout
+        _OBSERVED_CHECKOUTS[checkout] = {"head": head, "dirty": dirty, "note": note}
     return dict(_OBSERVED_CHECKOUTS[checkout])
 
 
-# The Foundation pin: its declared checkout, a repository-relative folder below 10_pkg/deps/ (a Git
-# submodule); the removed key that held a local path.
+# The Foundation pin: its declared checkout, a repository-relative folder below 10_pkg/deps/ that the
+# repository's .gitmodules lists as a submodule path (the submodule is the declaration; the pin names
+# its path); the removed key that held a local path. A checkout is found through the environment
+# override or the declared path, the two recorded sources.
 DEPS_PATH_KEY = "deps_path"
-DEPS_FOLDER = ("10_pkg", "deps")
 REMOVED_PIN_KEY = "local_root"
+SOURCE_ENVIRONMENT = "environment"
+SOURCE_DECLARED = DEPS_PATH_KEY
+# One folder name of a deps_path: a letter or digit first, then letters, digits, ".", "_" or "-", and no
+# trailing dot (Windows drops a trailing dot or space, so "x." would alias "x").
+DEPS_SEGMENT_PATTERN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9_-])?")
+GITMODULES_FILE = ".gitmodules"
+GITMODULES_PATH_PATTERN = re.compile(r"^[ \t]*path[ \t]*=[ \t]*(.*?)[ \t]*$", re.MULTILINE)
+SUBMODULE_INIT_STEP = "git submodule update --init %s"
+SUBMODULE_ADD_STEP = "git submodule add %s %s"
+# The repository a pin names when it names none (the pin's "repository" key is recorded metadata).
+UNNAMED_REPOSITORY = "<repository URL>"
 
 # Resolved Foundation checkouts of this process: (pin path, pin bytes, override) -> standard_checkout.
 _STANDARD_CHECKOUTS = {}
 
 
-def _deps_path(value):
-    """The pin's deps_path when it is a repository-relative path with / separators below 10_pkg/deps/
-    that names a checkout folder; None otherwise."""
-    if not isinstance(value, str) or not value or value.startswith("/") or "\\" in value or ":" in value:
-        return None
+def _deps_path_defect(value):
+    """None when `value` is a valid deps_path, otherwise the rule it breaks."""
+    if not isinstance(value, str) or not value:
+        return "it must be a non-empty string"
+    if value.startswith("/") or "\\" in value or ":" in value:
+        return "it must be repository-relative with / separators (no root, drive, backslash or stream)"
     parts = value.split("/")
-    if any(part in ("", ".", "..") for part in parts) or tuple(parts[:len(DEPS_FOLDER)]) != DEPS_FOLDER \
-            or len(parts) <= len(DEPS_FOLDER):
-        return None
-    return value
+    if tuple(parts[:len(DEPS_FOLDER)]) != DEPS_FOLDER or len(parts) <= len(DEPS_FOLDER):
+        return "it must name a folder below %s/" % "/".join(DEPS_FOLDER)
+    for part in parts[len(DEPS_FOLDER):]:
+        if DEPS_SEGMENT_PATTERN.fullmatch(part) is None:
+            return ("its segment %r is not a plain folder name (a letter or digit first, then letters, digits, "
+                    "'.', '_' or '-', no trailing dot or space)" % part)
+    return None
+
+
+def _submodule_paths(repo_root):
+    """The submodule paths that the repository's .gitmodules lists (empty without the file)."""
+    path = os.path.join(repo_root, GITMODULES_FILE)
+    if not os.path.lexists(path):
+        return set()
+    try:
+        _require(os.path.isfile(path) and not process.is_link(path), "%s is not a regular file" % path)
+        with open(path, "r", encoding="utf-8") as handle:
+            return set(GITMODULES_PATH_PATTERN.findall(handle.read()))
+    except (OSError, ValueError, RegistryError) as error:
+        raise RegistryError("the submodule declarations %s are unreadable: %s. Next step: repair %s."
+                            % (path, error, GITMODULES_FILE))
+
+
+def _folder_state(path):
+    """None for a folder that holds an entry, otherwise "missing", "a file, not a folder" or "empty"."""
+    if not os.path.lexists(path):
+        return "missing"
+    if not os.path.isdir(path):
+        return "a file, not a folder"
+    return None if os.listdir(path) else "empty"
 
 
 def _standard_pin(settings):
@@ -679,27 +762,28 @@ def _standard_pin(settings):
     _require(isinstance(pin.get("public_header"), str) and pin["public_header"],
              "the fnd-sdk-standard pin names no public_header")
     _require(REMOVED_PIN_KEY not in pin,
-             "the fnd-sdk-standard pin %s holds %s: a pin holds no local path. Next step: remove %s, add the "
-             "Foundation as a Git submodule under %s/ and name it in %s (override with %s)."
+             "the fnd-sdk-standard pin %s holds %s: a pin holds no machine path outside the repository. Next step: "
+             "remove %s, add the dependency as a Git submodule below %s/ and name its path in %s (override with %s)."
              % (pin_path, REMOVED_PIN_KEY, REMOVED_PIN_KEY, "/".join(DEPS_FOLDER), DEPS_PATH_KEY,
                 pin["root_variable"]))
-    _require(_deps_path(pin.get(DEPS_PATH_KEY)) is not None,
-             "the fnd-sdk-standard pin %s: %s must be a repository-relative path with / separators below %s/ "
-             "(found %r). Next step: name the Foundation submodule folder, e.g. %s/fnd-platform-architecture."
-             % (pin_path, DEPS_PATH_KEY, "/".join(DEPS_FOLDER), pin.get(DEPS_PATH_KEY), "/".join(DEPS_FOLDER)))
+    defect = _deps_path_defect(pin.get(DEPS_PATH_KEY))
+    _require(defect is None,
+             "the fnd-sdk-standard pin %s: %s %r is invalid: %s. Next step: name the submodule folder of the "
+             "dependency below %s/." % (pin_path, DEPS_PATH_KEY, pin.get(DEPS_PATH_KEY), defect, "/".join(DEPS_FOLDER)))
     return pin_path, pin_bytes, pin
 
 
 def standard_checkout(settings=None):
     """The Foundation checkout that supplies the fnd-sdk-standard, with its recorded identity.
 
-    The root is the directory named by the pin's root_variable (an override the machine supplies) or,
-    when that variable is unset or empty, the declared checkout deps_path below this repository's
-    10_pkg/deps/ (a Git submodule). Nothing else is searched. It must exist and hold the public header
-    (fail closed: nothing can be compiled otherwise). The pin's commit is recorded metadata: the result
-    holds the root, its source (environment or deps_path), the pinned commit, the observed HEAD and
-    dirty state and whether HEAD equals the pin; a mismatch or a dirty tree is never refused. The
-    result is reused for the same pin and override for the rest of the process."""
+    The pin's deps_path must be a submodule path that the repository's .gitmodules lists. The root is
+    the directory named by the pin's root_variable (an override the machine supplies) or, when that
+    variable is unset or empty, the declared submodule folder deps_path. Nothing else is searched. It
+    must exist, contain no linked or reparse component, lie outside the repository or below 10_pkg/deps/
+    and hold the public header (fail closed: nothing can be compiled otherwise). The pin's commit is
+    recorded metadata: the result holds the root, its source (environment or deps_path), the pinned
+    commit, the observed HEAD, dirty state and note and whether HEAD equals the pin; a mismatch or a dirty
+    tree is never refused. The result is reused for the same pin and override for the rest of the process."""
     settings = _settings(settings)
     pin_path, pin_bytes, pin = _standard_pin(settings)
     override = os.environ.get(pin["root_variable"], "")
@@ -710,41 +794,62 @@ def standard_checkout(settings=None):
 
 
 def _resolve_standard_checkout(settings, pin, override):
-    declared = settings.path_of(pin[DEPS_PATH_KEY])
-    source, root = ("environment", override) if override else (DEPS_PATH_KEY, declared)
+    deps_path = pin[DEPS_PATH_KEY]
+    declared = settings.path_of(deps_path)
+    repository = pin["repository"] if isinstance(pin.get("repository"), str) and pin["repository"] \
+        else UNNAMED_REPOSITORY
+    source, root = (SOURCE_ENVIRONMENT, override) if override else (SOURCE_DECLARED, declared)
     pinned = pin.get("commit") if isinstance(pin.get("commit"), str) else None
     pin_path = settings.path_of(settings.host_build["standard_pin"])
     details = {"root_variable": pin["root_variable"], "environment_value": override or None,
-               DEPS_PATH_KEY: pin[DEPS_PATH_KEY], "source": source, "root": root, "pin": pin_path,
+               DEPS_PATH_KEY: deps_path, "source": source, "root": root, "pin": pin_path,
                "pinned_commit": pinned}
+    gitmodules = os.path.join(settings.repo_root, GITMODULES_FILE)
+    if deps_path not in _submodule_paths(settings.repo_root):
+        raise RegistryError(
+            "the fnd-sdk-standard pin %s names %s %s, but %s lists no submodule at that path: the submodule is the "
+            "declaration and the pin names its path. Next step: run %s, or correct %s to the declared submodule path."
+            % (pin_path, DEPS_PATH_KEY, deps_path, gitmodules, SUBMODULE_ADD_STEP % (repository, deps_path),
+               DEPS_PATH_KEY),
+            dict(details, gitmodules=gitmodules))
     if override and not os.path.isdir(root):
         raise RegistryError(
             "the fnd-sdk-standard checkout is not found: %s is %s, not a directory (pin %s, pinned commit %s, "
-            "recorded metadata). Next step: point %s at a fnd-platform-architecture checkout, or unset it to use "
-            "the declared checkout %s." % (pin["root_variable"], override, pin_path, pinned, pin["root_variable"],
-                                           declared),
+            "recorded metadata). Next step: point %s at a checkout of %s, or unset it to use the declared "
+            "checkout %s." % (pin["root_variable"], override, pin_path, pinned, pin["root_variable"], repository,
+                              declared),
             details)
-    if not override and (not os.path.isdir(root) or not os.listdir(root)):
-        raise RegistryError(
-            "the fnd-sdk-standard checkout is not found: the declared checkout %s (%s %s of %s; %s is unset) is %s "
-            "(pinned commit %s, recorded metadata). Next step: run git submodule update --init %s, or set %s to a "
-            "fnd-platform-architecture checkout."
-            % (root, DEPS_PATH_KEY, pin[DEPS_PATH_KEY], pin_path, pin["root_variable"],
-               "empty" if os.path.isdir(root) else "missing", pinned, pin[DEPS_PATH_KEY], pin["root_variable"]),
-            details)
-    checkout = os.path.realpath(root)
+    if not override:
+        try:
+            state = _folder_state(root)
+        except OSError as error:
+            raise RegistryError(
+                "the fnd-sdk-standard declared checkout %s (%s %s of %s) is not readable: %s. Next step: repair "
+                "the folder, then run %s." % (root, DEPS_PATH_KEY, deps_path, pin_path, error,
+                                              SUBMODULE_INIT_STEP % deps_path),
+                details)
+        if state is not None:
+            raise RegistryError(
+                "the fnd-sdk-standard checkout is not found: the declared checkout %s (%s %s of %s; %s is unset) is "
+                "%s (pinned commit %s, recorded metadata). Next step: run %s, or set %s to a checkout of %s."
+                % (root, DEPS_PATH_KEY, deps_path, pin_path, pin["root_variable"], state, pinned,
+                   SUBMODULE_INIT_STEP % deps_path, pin["root_variable"], repository),
+                details)
+    checkout = dependency_checkout_root(root, settings.repo_root, "the fnd-sdk-standard checkout",
+                                        "found through %s" % source, details)
     header = os.path.join(checkout, *pin["public_header"].split("/"))
     observed = observed_checkout(checkout)
     if not os.path.isfile(header):
         raise RegistryError(
             "the fnd-sdk-standard public header %s is missing in the checkout %s (found through %s; HEAD %s, dirty %s, "
-            "pinned commit %s). Next step: select a Foundation checkout that holds %s (git submodule update --init "
-            "%s, or %s)." % (header, checkout, source, observed["head"], observed["dirty"], pinned,
-                             pin["public_header"], pin[DEPS_PATH_KEY], pin["root_variable"]),
-            dict(details, root=checkout, head=observed["head"], dirty=observed["dirty"], missing=header))
+            "pinned commit %s). Next step: select a checkout of %s that holds %s (%s, or %s)."
+            % (header, checkout, source, observed["head"], observed["dirty"], pinned, repository,
+               pin["public_header"], SUBMODULE_INIT_STEP % deps_path, pin["root_variable"]),
+            dict(details, root=checkout, head=observed["head"], dirty=observed["dirty"], note=observed["note"],
+                 missing=header))
     return {"root": checkout, "source": source, "root_variable": pin["root_variable"],
             "include_root": os.path.dirname(header), "pinned_commit": pinned,
-            "head": observed["head"], "dirty": observed["dirty"],
+            "head": observed["head"], "dirty": observed["dirty"], "note": observed["note"],
             "matches_pin": observed["head"] is not None and observed["head"] == pinned}
 
 

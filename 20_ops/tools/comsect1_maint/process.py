@@ -21,6 +21,9 @@ import sys
 PACKAGE_ROOT = os.path.dirname(os.path.abspath(__file__))
 TOOLS_ROOT = os.path.dirname(PACKAGE_ROOT)
 REPO_ROOT = os.path.abspath(os.path.join(TOOLS_ROOT, "..", ".."))
+# The one in-repository home of declared dependency checkouts (Git submodules), repository-relative
+# segments: a consumed checkout inside the repository lies below it, never elsewhere.
+DEPS_FOLDER = ("10_pkg", "deps")
 
 RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 REPARSE_FLAG = 0x400

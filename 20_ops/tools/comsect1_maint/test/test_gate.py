@@ -3,12 +3,14 @@
 """gate: the derived lane configuration and the exact scratch cleanup (Sunset guards, moved)."""
 import json
 import os
+import pathlib
 import unittest
 from unittest import mock
 
 import maint_support as support
 
 gate = support.package_module("gate")
+native_gate = support.package_module("native_gate")
 registry = support.package_module("registry")
 process = support.process
 
@@ -45,6 +47,34 @@ class GateTest(unittest.TestCase):
         self.assertEqual(build["system_include_roots"], ["C:/sdk/include"])
         self.assertEqual(build["definitions"], {"X": "1"})
         self.assertEqual(config["publications"][0]["inventory_member"], "sdk.swidtag")
+
+    def test_declared_in_repository_foundation_is_a_system_root_the_lane_admits(self):
+        root = self.work.folder("declared")
+        support.c_cell(root, "engine", "dcb", manifest={
+            "cell": "engine", "composition_context": {"hosted_vocabularies": [{"id": "fnd-sdk-standard"}]}})
+        settings = support.product(root, "dcb", {"engine": support.c_entry("engine")})
+        declared = "10_pkg/deps/fnd-platform-architecture"
+        support.write(root / declared / "10_pkg" / "include" / "comsect1_provider.h", "/* standard */\n")
+        support.write(root / ".gitmodules", '[submodule "fnd"]\n\tpath = %s\n' % declared)
+        support.write(root / "10_pkg" / "components" / "fnd_sdk_standard.json", json.dumps(
+            {"commit": "f" * 40, "root_variable": "DCB_FND_SDK_STANDARD_ROOT", "deps_path": declared,
+             "public_header": "10_pkg/include/comsect1_provider.h"}) + "\n")
+        cell = registry.load_registry(settings)["cells"]["engine"]
+        include = os.path.join(os.path.realpath(str(root)), *declared.split("/"), "10_pkg", "include")
+        with mock.patch.dict(os.environ, {"DCB_FND_SDK_STANDARD_ROOT": ""}), \
+                mock.patch.object(gate, "BASE_CONFIG", str(support.FIXTURES / "native_gate_config.json")), \
+                mock.patch.object(gate, "REPO_ROOT", str(root)):
+            config = gate.derived_config(cell, "windows")
+        self.assertEqual(config["build"]["system_include_roots"], [include.replace("\\", "/")])
+        with mock.patch.object(native_gate, "REPO_ROOT", pathlib.Path(str(root))):
+            self.assertEqual(native_gate.system_directories(config),
+                             [pathlib.Path(include).resolve()])
+            config["build"]["system_include_roots"] = [str(root / "10_pkg" / "c" / "engine").replace("\\", "/")]
+            with self.assertRaisesRegex(native_gate.ToolError, "inside this repository outside 10_pkg/deps/"):
+                native_gate.system_directories(config)
+            config["build"]["system_include_roots"] = [str(root / "10_pkg" / "deps").replace("\\", "/")]
+            with self.assertRaisesRegex(native_gate.ToolError, "inside this repository outside 10_pkg/deps/"):
+                native_gate.system_directories(config)
 
     def test_derived_config_without_hooks_keeps_the_base_members(self):
         root = self.work.folder("plain")

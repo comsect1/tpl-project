@@ -863,24 +863,47 @@ repository reaches another repository only through a declared dependency
 optional absolute `local_root`, and `registry.standard_checkout` refused a
 checkout inside the repository, so a product had to store a machine path.
 
-- The pin (`fnd_sdk_standard.json`) declares `deps_path`, the repository-relative
-  folder of the Foundation submodule below `10_pkg/deps/`
-  (`10_pkg/deps/fnd-platform-architecture`). It must use `/` separators, stay
-  below `10_pkg/deps/` and name a folder there: an absolute, drive,
-  backslash or `..` form fails closed. A pin that still holds `local_root` is a
-  configuration error: a pin holds no local path.
+- The declaration is the Git submodule (`.gitmodules` and the gitlink) below
+  `10_pkg/deps/`. The pin (`fnd_sdk_standard.json`) names its path in
+  `deps_path` (`10_pkg/deps/fnd-platform-architecture`); `.gitmodules` must
+  list that path, or the run fails with the `git submodule add <repository>
+  <deps_path>` step. `deps_path` uses `/` separators, starts with
+  `10_pkg/deps/` and names a folder there, and every further segment is a
+  plain folder name (a letter or digit first, then letters, digits, `.`, `_`
+  or `-`, no trailing dot or space): root, drive, backslash, stream, `.` and
+  `..` forms fail closed, each with the rule it breaks. A pin that still
+  holds `local_root` is a configuration error: a pin holds no machine path
+  outside the repository.
 - Resolution order, and nothing else: the pin's `root_variable` when the
-  environment sets it to a non-empty value (an override the machine supplies,
-  inside or outside the repository); otherwise `<repository root>/<deps_path>`.
-  The inside-the-repository refusal is removed for this resolution. A missing
-  or empty declared folder (an uninitialized submodule) fails closed with the
-  resolved path, how it was found, the pinned commit and the next step
-  `git submodule update --init <deps_path>` or setting the variable.
+  environment sets it to a non-empty value (an override the machine
+  supplies); otherwise `<repository root>/<deps_path>`. A missing, empty or
+  non-folder declared checkout (an uninitialized submodule) fails closed with
+  the resolved path, how it was found, the pinned commit and the step
+  `git submodule update --init <deps_path>` or setting the variable; an
+  unreadable folder is reported the same way.
+- One rule for every consumed checkout (`registry.dependency_checkout_root`,
+  Foundation and `external_headers`): no link or reparse component on its
+  path; inside the repository it lies below `10_pkg/deps/`, which holds no
+  Cell of the consumer. The former refusal of an in-repository checkout is
+  replaced by that rule. `external_headers` keeps environment-only
+  resolution: the registry entry names the variable and stores no path, so
+  it needs no declared path field; its checkout may now be a submodule below
+  `10_pkg/deps/`.
+- The native Gate admits a system include root inside the repository only
+  below `10_pkg/deps/` (`native_gate.system_directories`). The Foundation and
+  an adopted header tree stay system roots, the same `-isystem` search the
+  host and cross builds use; routing them through `external_include_roots`
+  would change their search order against the builds and treat a dependency
+  checkout like the membrane of a consumer Cell.
+- `observed_checkout` reads HEAD and the dirty state only when
+  `git rev-parse --show-toplevel` is the checkout itself (a clone, or a
+  submodule with its `.git` file). A plain folder inside the consumer's work
+  tree records `head` and `dirty` as None with a `note`, never the consumer's
+  identity.
 - Records: `fnd_sdk_standard.source` is `environment` or `deps_path`; the
-  resolved `root` is recorded; no record or error `details` holds `local_root`.
-  The pinned commit, observed HEAD, dirty state and `matches_pin` stay
-  metadata, never a refusal.
-- `external_headers` is unchanged: its checkout is named only by its
-  environment variable and no path is stored.
-- Toolchain location settings (`host_build.compiler_bin_dir`, the reference
-  toolchain) are outside this step.
+  resolved `root` and the observation `note` are recorded; no record or error
+  `details` holds `local_root`. The pinned commit, observed HEAD, dirty state
+  and `matches_pin` stay metadata, never a refusal.
+- Toolchain location settings (`host_build.compiler_bin_dir`,
+  `toolchain_bin_dir`, `hosted_include_roots`, the reference toolchain) are
+  outside this step; the policy names them as a known open non-conformance.

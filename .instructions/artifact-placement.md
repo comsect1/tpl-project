@@ -3,6 +3,7 @@
 | Material | Location |
 |---|---|
 | Authored implementation, test code, fixtures, build inputs | `10_pkg/` |
+| Declared dependency checkouts (Git submodules; not authored content, their Cells are not this repository's) | `10_pkg/deps/<name>/` |
 | Inputs and constraints | `20_ops/01_inputs/` |
 | Requirements and acceptance criteria | `20_ops/02_requirements/` |
 | Architecture, design, and decisions | `20_ops/03_blueprints/` |

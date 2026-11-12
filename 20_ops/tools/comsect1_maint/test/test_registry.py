@@ -182,6 +182,8 @@ class RegistryTest(unittest.TestCase):
 
     DECLARED = "10_pkg/deps/fnd-platform-architecture"
     VARIABLE = "DCB_FND_SDK_STANDARD_ROOT"
+    REPOSITORY = "https://example.invalid/fnd-platform-architecture.git"
+    COMMIT_COMMAND = ["-c", "user.name=t", "-c", "user.email=t@invalid", "commit", "-q", "-m", "fixture"]
 
     def short_folder(self, name):
         """A fresh folder below the system temporary directory, removed after the test (read-only Git
@@ -193,32 +195,45 @@ class RegistryTest(unittest.TestCase):
         path.mkdir()
         return path
 
-    def foundation(self, folder):
-        """A committed fixture Foundation checkout at `folder` holding the public header."""
+    def foundation(self, folder, git=True):
+        """A fixture Foundation at `folder` holding the public header; committed when `git`."""
         support.write(folder / "10_pkg" / "include" / "comsect1_provider.h", "/* standard */\n")
-        for command in (["init", "-q"], ["add", "-A"],
-                        ["-c", "user.name=t", "-c", "user.email=t@invalid", "commit", "-q", "-m", "fixture"]):
-            registry._git(str(folder), command)
+        if git:
+            for command in (["init", "-q"], ["add", "-A"], self.COMMIT_COMMAND):
+                registry._git(str(folder), command)
         return folder
 
-    def standard_product(self, name, declared=True, changes=None):
-        """A fixture product whose pin declares DECLARED; `declared` places a Foundation checkout there.
-        `changes` replaces pin keys (None as a value removes the key)."""
+    def standard_product(self, name, declared=True, changes=None, gitmodules=True, git=True):
+        """A fixture product whose pin declares DECLARED and whose .gitmodules lists it (`gitmodules`);
+        `declared` places a Foundation there (its own Git work tree when `git`). `changes` replaces pin
+        keys (None as a value removes the key)."""
         root = self.short_folder(name)
         support.c_cell(root, "engine", "dcb")
         settings = support.product(root, "dcb", {"engine": support.c_entry("engine")})
         checkout = root.joinpath(*self.DECLARED.split("/"))
         if declared:
-            self.foundation(checkout)
-        pin = {"commit": "f" * 40, "root_variable": self.VARIABLE, "deps_path": self.DECLARED,
-               "public_header": "10_pkg/include/comsect1_provider.h"}
+            self.foundation(checkout, git=git)
+        if gitmodules:
+            support.write(root / ".gitmodules", '[submodule "%s"]\n\tpath = %s\n\turl = %s\n'
+                          % (self.DECLARED, self.DECLARED, self.REPOSITORY))
+        self.write_pin(root, changes)
+        return settings, root, checkout
+
+    def write_pin(self, root, changes=None):
+        pin = {"repository": self.REPOSITORY, "commit": "f" * 40, "root_variable": self.VARIABLE,
+               "deps_path": self.DECLARED, "public_header": "10_pkg/include/comsect1_provider.h"}
         for key, value in (changes or {}).items():
             if value is None:
                 pin.pop(key, None)
             else:
                 pin[key] = value
         support.write(root / "10_pkg" / "components" / "fnd_sdk_standard.json", json.dumps(pin) + "\n")
-        return settings, root, checkout
+
+    def checkout_error(self, settings, override=""):
+        with mock.patch.dict(os.environ, {self.VARIABLE: override}):
+            with self.assertRaises(registry.RegistryError) as caught:
+                registry.standard_checkout(settings)
+        return caught.exception
 
     def test_foundation_resolves_at_the_declared_in_repository_path(self):
         settings, _root, checkout = self.standard_product("standard_declared")
@@ -228,9 +243,40 @@ class RegistryTest(unittest.TestCase):
         real = os.path.realpath(str(checkout))
         self.assertEqual(include, os.path.join(real, "10_pkg", "include"))
         self.assertEqual((record["root"], record["source"], record["root_variable"], record["dirty"],
-                          record["matches_pin"]), (real, "deps_path", self.VARIABLE, False, False))
+                          record["matches_pin"], record["note"]), (real, "deps_path", self.VARIABLE, False, False, None))
         self.assertEqual(record["head"], registry._git(str(checkout), ["rev-parse", "HEAD"]))
         self.assertNotIn("local_root", record)
+
+    def test_real_submodule_is_observed_through_its_git_file(self):
+        root = self.short_folder("standard_submodule")
+        source = self.foundation(self.short_folder("standard_submodule_source"))
+        head = registry._git(str(source), ["rev-parse", "HEAD"])
+        support.c_cell(root, "engine", "dcb")
+        settings = support.product(root, "dcb", {"engine": support.c_entry("engine")})
+        registry._git(str(root), ["init", "-q"])
+        registry._git(str(root), ["-c", "protocol.file.allow=always", "submodule", "--quiet", "add",
+                                  str(source), self.DECLARED])
+        checkout = root.joinpath(*self.DECLARED.split("/"))
+        self.assertTrue((checkout / ".git").is_file())
+        self.write_pin(root, {"commit": head})
+        with mock.patch.dict(os.environ, {self.VARIABLE: ""}):
+            record = registry.standard_checkout(settings)
+        self.assertEqual((record["root"], record["source"], record["head"], record["dirty"], record["matches_pin"],
+                          record["note"]), (os.path.realpath(str(checkout)), "deps_path", head, False, True, None))
+
+    def test_plain_folder_inside_the_consumer_work_tree_records_no_head(self):
+        settings, root, checkout = self.standard_product("standard_plain", git=False)
+        registry._git(str(root), ["init", "-q"])
+        registry._git(str(root), ["add", "-A"])
+        registry._git(str(root), self.COMMIT_COMMAND)
+        with mock.patch.dict(os.environ, {self.VARIABLE: ""}):
+            record = registry.standard_checkout(settings)
+        self.assertEqual((record["head"], record["dirty"], record["matches_pin"]), (None, None, False))
+        self.assertIn("no Git work tree of its own", record["note"])
+        bare = self.foundation(self.short_folder("standard_plain_bare"), git=False)
+        record = registry.observed_checkout(os.path.realpath(str(bare)))
+        self.assertEqual((record["head"], record["dirty"]), (None, None))
+        self.assertIn("no Git work tree", record["note"])
 
     def test_environment_override_wins_and_is_recorded_not_refused(self):
         settings, _root, checkout = self.standard_product("standard_record")
@@ -247,67 +293,144 @@ class RegistryTest(unittest.TestCase):
         self.assertNotEqual(record["root"], os.path.realpath(str(checkout)))
         self.assertNotIn("local_root", record)
 
-    def test_environment_override_inside_the_repository_is_accepted(self):
+    def test_environment_override_inside_the_repository_lies_below_the_deps_folder(self):
         settings, root, _checkout = self.standard_product("standard_inside", declared=False)
-        inside = self.foundation(root / "10_pkg" / "vendor" / "foundation")
+        inside = self.foundation(root / "10_pkg" / "deps" / "other")
         with mock.patch.dict(os.environ, {self.VARIABLE: str(inside)}):
             record = registry.standard_checkout(settings)
         self.assertEqual((record["root"], record["source"]), (os.path.realpath(str(inside)), "environment"))
-        with mock.patch.dict(os.environ, {self.VARIABLE: str(root / "10_pkg" / "absent")}):
-            with self.assertRaises(registry.RegistryError) as caught:
-                registry.standard_checkout(settings)
-        for text in ("checkout is not found", "not a directory", self.VARIABLE, "Next step"):
-            self.assertIn(text, str(caught.exception))
-        self.assertEqual(caught.exception.details["source"], "environment")
+        elsewhere = self.foundation(root / "10_pkg" / "vendor" / "foundation", git=False)
+        for path in (elsewhere, root / "10_pkg" / "deps"):
+            with self.subTest(path=path):
+                error = self.checkout_error(settings, str(path))
+                for text in ("lies inside this repository outside 10_pkg/deps/", "found through environment",
+                             "Next step: add the dependency as a Git submodule below 10_pkg/deps/"):
+                    self.assertIn(text, str(error))
+        error = self.checkout_error(settings, str(root / "10_pkg" / "absent"))
+        for text in ("checkout is not found", "not a directory", self.VARIABLE, "Next step", self.REPOSITORY):
+            self.assertIn(text, str(error))
+        self.assertEqual(error.details["source"], "environment")
 
     def test_pin_with_a_local_path_is_rejected(self):
         settings, _root, checkout = self.standard_product("standard_local", changes={"local_root": "unused"})
-        with mock.patch.dict(os.environ, {self.VARIABLE: str(checkout)}):
-            with self.assertRaises(registry.RegistryError) as caught:
-                registry.standard_checkout(settings)
-        for text in ("holds local_root", "a pin holds no local path", "Next step", "remove local_root",
-                     "10_pkg/deps/", "deps_path", "fnd_sdk_standard.json"):
-            self.assertIn(text, str(caught.exception))
+        error = self.checkout_error(settings, str(checkout))
+        for text in ("holds local_root", "a pin holds no machine path outside the repository", "Next step",
+                     "remove local_root", "10_pkg/deps/", "deps_path", "fnd_sdk_standard.json"):
+            self.assertIn(text, str(error))
 
-    def test_declared_path_must_stay_below_the_repository_deps_folder(self):
-        root = pathlib.Path(tempfile.gettempdir()) / "standard_paths"
-        values = (None, "", str(root / "10_pkg" / "deps" / "x"), "/10_pkg/deps/x", "C:/10_pkg/deps/x",
-                  "10_pkg\\deps\\x", "\\10_pkg\\deps\\x", "10_pkg/deps/../../x", "../10_pkg/deps/x",
-                  "10_pkg/deps/./x", "10_pkg/deps//x", "10_pkg/deps", "10_pkg/other/x", "deps/x", 7)
+    def deps_path_error(self, name, value):
+        settings, _root, _checkout = self.standard_product(name, declared=False, gitmodules=False,
+                                                           changes={"deps_path": value})
+        return str(self.checkout_error(settings))
+
+    def test_deps_path_must_be_a_non_empty_string(self):
+        for index, value in enumerate((None, "", 7)):
+            with self.subTest(deps_path=value):
+                self.assertIn("it must be a non-empty string", self.deps_path_error("type_%d" % index, value))
+
+    def test_deps_path_must_be_repository_relative(self):
+        values = (str(pathlib.Path(tempfile.gettempdir()) / "10_pkg" / "deps" / "x"), "/10_pkg/deps/x",
+                  "C:/10_pkg/deps/x", "C:10_pkg/deps/x", "10_pkg\\deps\\x", "\\10_pkg\\deps\\x",
+                  "10_pkg/deps/x:stream")
         for index, value in enumerate(values):
-            settings, _root, _checkout = self.standard_product("standard_paths_%d" % index, declared=False,
-                                                               changes={"deps_path": value})
-            with self.subTest(deps_path=value), mock.patch.dict(os.environ, {self.VARIABLE: ""}):
-                with self.assertRaisesRegex(registry.RegistryError, "deps_path must be a repository-relative path"):
-                    registry.standard_checkout(settings)
+            with self.subTest(deps_path=value):
+                self.assertIn("it must be repository-relative with / separators",
+                              self.deps_path_error("relative_%d" % index, value))
+
+    def test_deps_path_must_name_a_folder_below_the_deps_folder(self):
+        values = ("10_pkg/deps", "../10_pkg/deps/x", "10_pkg/other/x", "deps/x", "10_PKG/deps/x", "x/10_pkg/deps/y")
+        for index, value in enumerate(values):
+            with self.subTest(deps_path=value):
+                self.assertIn("it must name a folder below 10_pkg/deps/", self.deps_path_error("below_%d" % index, value))
+
+    def test_deps_path_segments_are_plain_folder_names(self):
+        values = ("10_pkg/deps/", "10_pkg/deps/x/", "10_pkg/deps//x", "10_pkg/deps/.", "10_pkg/deps/..",
+                  "10_pkg/deps/.. ", "10_pkg/deps/../x", "10_pkg/deps/./x", "10_pkg/deps/x.", "10_pkg/deps/x ",
+                  "10_pkg/deps/.x", "10_pkg/deps/-x", "10_pkg/deps/x y")
+        for index, value in enumerate(values):
+            with self.subTest(deps_path=value):
+                self.assertIn("is not a plain folder name", self.deps_path_error("segment_%d" % index, value))
+        for value in (self.DECLARED, "10_pkg/deps/a.b_c-d/e1"):
+            self.assertIsNone(registry._deps_path_defect(value))
+
+    def test_deps_path_must_be_a_declared_submodule(self):
+        settings, root, _checkout = self.standard_product("standard_undeclared", gitmodules=False)
+        error = self.checkout_error(settings)
+        for text in ("lists no submodule at that path", "the submodule is the declaration",
+                     "Next step: run git submodule add %s %s" % (self.REPOSITORY, self.DECLARED)):
+            self.assertIn(text, str(error))
+        self.assertNotIn("submodule update", str(error))
+        support.write(root / ".gitmodules", '[submodule "x"]\n\tpath = 10_pkg/deps/other\n')
+        self.assertIn("lists no submodule at that path", str(self.checkout_error(settings)))
 
     def test_missing_declared_checkout_fails_closed_with_the_submodule_step(self):
         settings, _root, checkout = self.standard_product("standard_missing", declared=False)
-        for state in ("missing", "empty"):
+        for state in ("missing", "a file, not a folder", "empty"):
+            if state == "a file, not a folder":
+                support.write(checkout, "not a folder\n")
             if state == "empty":
+                checkout.unlink()
                 checkout.mkdir(parents=True)
-            with self.subTest(state=state), mock.patch.dict(os.environ, {self.VARIABLE: ""}):
-                with self.assertRaises(registry.RegistryError) as caught:
-                    registry.standard_checkout(settings)
+            with self.subTest(state=state):
+                error = self.checkout_error(settings)
                 for text in ("checkout is not found", "declared checkout", "is %s" % state, str(checkout),
                              "%s is unset" % self.VARIABLE, "f" * 40,
                              "Next step: run git submodule update --init %s" % self.DECLARED):
-                    self.assertIn(text, str(caught.exception))
-                details = caught.exception.details
-                self.assertEqual((details["source"], details["deps_path"], details["pinned_commit"]),
+                    self.assertIn(text, str(error))
+                self.assertEqual((error.details["source"], error.details["deps_path"], error.details["pinned_commit"]),
                                  ("deps_path", self.DECLARED, "f" * 40))
-                self.assertNotIn("local_root", details)
+                self.assertNotIn("local_root", error.details)
+        with mock.patch.object(registry.os, "listdir", side_effect=PermissionError("denied")):
+            error = self.checkout_error(settings)
+        for text in ("is not readable", "denied", "Next step", "git submodule update --init %s" % self.DECLARED):
+            self.assertIn(text, str(error))
         settings, _root, checkout = self.standard_product("standard_header")
         os.remove(str(checkout / "10_pkg" / "include" / "comsect1_provider.h"))
-        with mock.patch.dict(os.environ, {self.VARIABLE: ""}):
-            with self.assertRaises(registry.RegistryError) as caught:
-                registry.standard_checkout(settings)
+        error = self.checkout_error(settings)
         head = registry._git(str(checkout), ["rev-parse", "HEAD"])
         for text in ("public header", "is missing", "found through deps_path", head, "Next step",
                      "git submodule update --init %s" % self.DECLARED):
+            self.assertIn(text, str(error))
+        self.assertEqual(error.details["head"], head)
+        self.assertNotIn("local_root", error.details)
+
+    def test_linked_declared_checkout_is_refused(self):
+        settings, _root, checkout = self.standard_product("standard_linked", declared=False)
+        target = self.foundation(self.short_folder("standard_linked_target"), git=False)
+        checkout.parent.mkdir(parents=True)
+        try:
+            os.symlink(str(target), str(checkout), target_is_directory=True)
+        except (OSError, NotImplementedError):
+            try:
+                import _winapi
+                _winapi.CreateJunction(str(target), str(checkout))
+            except (ImportError, AttributeError, OSError):
+                self.skipTest("this platform cannot create a symbolic link or a junction")
+        error = self.checkout_error(settings)
+        for text in ("is not usable", "linked or reparse", "Next step: use the checkout folder itself"):
+            self.assertIn(text, str(error))
+
+    def test_external_checkout_inside_the_repository_lies_below_the_deps_folder(self):
+        root = self.short_folder("external_inside")
+        support.c_cell(root, "freertos", "dcb")
+        support.write(root / "10_pkg" / "test" / "config" / "x.h", "/* config */\n")
+        section = {"environment": "DCB_KERNEL", "commit": "0" * 40, "include_roots": ["include"],
+                   "core_include_roots": {"cortex-m4": []}, "gate_core": "cortex-m4", "config_roots": ["10_pkg/test/config"]}
+        cells = {"freertos": support.c_entry("freertos", ("arm",), external_headers=section)}
+        cell = registry.load_registry(support.product(root, "dcb", cells))["cells"]["freertos"]
+        kernel = root / "10_pkg" / "deps" / "kernel"
+        (kernel / "include").mkdir(parents=True)
+        with mock.patch.dict(os.environ, {"DCB_KERNEL": str(kernel)}):
+            roots, _ = cell.external_roots("cortex-m4")
+        self.assertEqual(roots, [os.path.join(os.path.realpath(str(kernel)), "include")])
+        elsewhere = root / "10_pkg" / "vendor" / "kernel"
+        (elsewhere / "include").mkdir(parents=True)
+        with mock.patch.dict(os.environ, {"DCB_KERNEL": str(elsewhere)}):
+            with self.assertRaises(registry.RegistryError) as caught:
+                cell.external_roots("cortex-m4")
+        for text in ("external header checkout", "lies inside this repository outside 10_pkg/deps/", "from DCB_KERNEL",
+                     "Next step"):
             self.assertIn(text, str(caught.exception))
-        self.assertEqual(caught.exception.details["head"], head)
-        self.assertNotIn("local_root", caught.exception.details)
 
     def test_stems_symbols_and_cycles(self):
         with self.assertRaisesRegex(registry.RegistryError, "2 .c files"):

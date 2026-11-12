@@ -26,6 +26,10 @@ Product-owned JSON contracts and runtime configuration remain ordinary product
 artifacts; this rule forbids additional Comsect1 control surfaces, not JSON as
 a medium.
 
+A `comsect1.json` inside a declared dependency checkout (`10_pkg/deps/<name>/`)
+belongs to that dependency: its Cell is not a Cell of this repository and is
+not authored or refactored here.
+
 ## Three independent decisions
 
 Choose a zone, a semantic role when applicable, and a classification in that

@@ -126,6 +126,7 @@ REPARSE_FLAG = process.REPARSE_FLAG
 CREATE_NO_WINDOW = process.CREATE_NO_WINDOW
 CREATE_NEW_PROCESS_GROUP = process.CREATE_NEW_PROCESS_GROUP
 REPO_ROOT = Path(process.REPO_ROOT)
+DEPS_FOLDER = process.DEPS_FOLDER
 COUNT_NAMES = ("assessment_count", "debt_count", "limit_count", "notice_count", "rework_count", "violation_count")
 VERDICTS = ("PASS", "WARN", "REQ", "INDETERMINATE", "FAIL")
 # The Gate handoff and exit of each verdict; Gate exit 2 is an execution error without a conclusion.
@@ -558,14 +559,22 @@ def include_directories(config, cell):
 
 def system_directories(config):
     """External SDK include roots (read only), searched after the clang resource directory, so
-    the freestanding headers resolve to the resource directory and the SDK headers to the SDK."""
+    the freestanding headers resolve to the resource directory and the SDK headers to the SDK.
+
+    A root lies outside this repository or inside a declared dependency checkout below
+    10_pkg/deps/ (a Git submodule: the Foundation, an adopted header tree); no other folder of
+    this repository, which holds the Cells, is a system root."""
     result = []
+    repo = REPO_ROOT.resolve()
+    deps = repo.joinpath(*DEPS_FOLDER)
     for root in config["build"]["system_include_roots"]:
         directory = checked_original_path(root) if Path(root).exists() else Path(root)
         if not directory.is_dir():
             raise ToolError(EXIT_PLAN_FAILED, "system include root %r is not a directory" % root)
-        if REPO_ROOT.resolve() in directory.parents or directory == REPO_ROOT.resolve():
-            raise ToolError(EXIT_PLAN_FAILED, "system include root %r lies inside this repository" % root)
+        if (repo in directory.parents or directory == repo) and deps not in directory.parents:
+            raise ToolError(EXIT_PLAN_FAILED, "system include root %r lies inside this repository outside %s/ "
+                            "(only a declared dependency checkout below it is a system root)"
+                            % (root, "/".join(DEPS_FOLDER)))
         if is_link(directory):
             raise ToolError(EXIT_PLAN_FAILED, "system include root %r is a link or reparse point" % root)
         result.append(directory)

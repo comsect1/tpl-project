@@ -23,7 +23,10 @@
 - Preserve the complete template folder tree, including placement directories
   that are not yet populated.
 - `10_pkg/` owns authored implementation, executable test source, fixtures, and
-  build-consumed inputs.
+  build-consumed inputs. `10_pkg/deps/<name>/` holds declared dependency
+  checkouts (Git submodules), not authored content; a Cell inside one belongs
+  to that dependency, not to this repository
+  ([consumed dependencies](./.instructions/consumed-dependencies.md) section 6).
 - `20_ops/01_inputs/` through `20_ops/10_release/` own one continuous preparation,
   development, verification, validation, traceability, assurance, and release
   process.
