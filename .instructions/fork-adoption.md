@@ -28,9 +28,13 @@ Complete this checklist in the template-derived repository's first change:
    `python -I -B 20_ops/tools/text_format.py --apply` once before structural verification.
 11. Confirm future template synchronization is configured to update common
     files while preserving `.instructions/kind/` and `.instructions/local/`.
-    Synchronization also copies `20_ops/tools/comsect1_maint/` and the entry
-    shims (`comsect1_maint/sync.py --from <template checkout>`); record the
-    template and its baseline commit in `.instructions/template-origin.json`
-    (`comsect1.template-origin.v1`). A repository that uses the maintainer
+    Synchronization also copies `20_ops/tools/comsect1_maint/`, the entry
+    shims and the common instruction files
+    (`comsect1_maint/sync.py --from <template checkout>`); `AGENTS.md` is
+    merged by hand. Follow the procedure of
+    [instruction layers](./instruction-layers.md) (template synchronization
+    boundary) and record the template and its baseline commit in
+    `.instructions/template-origin.json` (`comsect1.template-origin.v1`)
+    exactly as it states. A repository that uses the maintainer
     tools writes `20_ops/tools/maint_config.json` and, only for product logic
     that is not data, `20_ops/tools/product_hooks.py`.

@@ -11,8 +11,8 @@ The reference tools root is found by one rule, in this order:
 1. `COMSECT1_REFERENCE_TOOLS`, when set: it must be an absolute directory. A set
    but unusable value is an error; it never falls through to the layout.
 2. Otherwise the canonical checkout layout: the nearest ancestor of the
-   repository root that holds `00_reference/tools/` (on the workbench
-   `F:/repos/00_reference/tools/`, whatever the depth of the checkout).
+   repository root that holds `00_reference/tools/`, whatever the depth of
+   the checkout.
 
 The selected bundle `<root>/<bundle>/` must hold the pinned provenance file.
 There is no other source: no `LLVM_HOME`, no Android NDK, no PATH search.

@@ -107,8 +107,25 @@ An override may point outside the repository or at a checkout below
 a Cell inside it is not a Cell of the consumer. Dated run records and issued
 evidence state what was run and are not rewritten when a location changes.
 
+The `url` that `.gitmodules` records for a submodule is the canonical remote
+URL of the dependency, in the form `git@github.com:<owner>/<repo>.git` for a
+repository hosted on GitHub, so that every workstation resolves the same
+tracked declaration. A workstation that reaches the remote through a
+per-account SSH host alias applies the alias locally, in its own Git
+configuration, with `git config --global url.<alias base>.insteadOf
+git@github.com:<owner>/`; a host alias, an account name or any other
+per-workstation rewrite never appears in `.gitmodules` or in any other tracked
+file. The maintainer tools read only the `path` of a `.gitmodules` entry and do
+not judge its `url`; this rule is enforced by review.
+
 Known open non-conformance: the maintainer tool configuration still requires
 absolute toolchain and system include locations (`compiler_bin_dir`,
 `toolchain_bin_dir`, `hosted_include_roots`). These locations are to move to
 environment or layout resolution; until then, they are the only stored paths
-outside the repository that this policy tolerates.
+outside the repository that this policy tolerates. Each key is retired on its
+own when the reference toolchain pin ([reference toolchain](./reference-toolchain.md))
+provides the input that key locates: from the template commit that adds that
+input to the pin, the maintainer tools resolve it through the pin and the
+reference tools location rule only, the key is removed from every
+configuration, and the tools refuse a configuration that still holds it, as
+they refuse `local_root` in a pin.

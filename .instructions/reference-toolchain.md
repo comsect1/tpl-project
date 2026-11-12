@@ -4,6 +4,26 @@ This is the common rule for where every repository finds the C toolchain
 inputs it does not build itself. Decided by recommendation on 2026-11-12,
 owner sign-off pending (Foundation decision log D19).
 
+## Scope
+
+Every repository that builds C is bound by this file, whatever tool builds
+it. Sections 1 and 3 name the record and the records that the maintainer
+tools (`20_ops/tools/comsect1_maint/`) carry; the rule itself does not depend
+on them. A repository whose C build does not run the maintainer tools:
+
+- takes the toolchain identity (bundle, version) only from its own
+  synchronized copy of `20_ops/tools/comsect1_maint/reference_toolchain.json`,
+  which synchronization delivers whether or not the repository runs the tools;
+- locates the bundle only by the rule of section 2, and keeps no second pin,
+  no toolchain version and no bundle location of its own;
+- compiles every Cell as C23 only (section 4) and respects section 5;
+- records the pin, the reference tools root and how it was found in every run
+  record its build writes, and never refuses on a digest (section 3);
+- names, in its kind or local instructions, the build entry point that
+  applies this rule, without restating the pin.
+
+A repository that builds no C is not bound by sections 2 to 5.
+
 ## 1. One pin
 
 `20_ops/tools/comsect1_maint/reference_toolchain.json` is the only pin record:
@@ -20,8 +40,7 @@ The reference tools root is, in this order:
 1. `COMSECT1_REFERENCE_TOOLS`, when set: an absolute existing directory. A set
    but unusable value is an error; it never falls through.
 2. Otherwise the nearest ancestor of the repository root that holds
-   `00_reference/tools/` (on the workbench `F:/repos/00_reference/tools/`, at
-   any checkout depth).
+   `00_reference/tools/`, at any checkout depth.
 
 The bundle is `<root>/<bundle>/` with its `provenance.json`
 (`native_c_toolchain_inputs`: official release, archive SHA-256 and the size

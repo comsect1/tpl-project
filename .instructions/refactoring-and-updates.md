@@ -49,9 +49,9 @@ membership or category structure.
    structure, relative paths, the original structural checks, complete Cell verification,
    and affected direct consumers in the candidate's fresh run. A lower finding
    count with a changed finding class or a new unresolved, lineage,
-    role-direction, effect-ownership, or forwarding-seam defect is not
-    completion. Run `python -I -B 20_ops/tools/text_format.py` before structural verification so working-tree
-    byte drift is reported independently of architecture findings.
+   role-direction, effect-ownership, or forwarding-seam defect is not
+   completion. Run `python -I -B 20_ops/tools/text_format.py` before structural verification so working-tree
+   byte drift is reported independently of architecture findings.
 8. Record reviewed results in `20_ops/`; issue a package into `30_cert/` only
    through an authorized finalization step.
 9. Clean the exact task-owned run through `99_trash/`.

@@ -53,7 +53,7 @@ paths and must be avoided.
      `<home>/host`, `<home>/gravity` — **never** `<home>/container/.eschaton-dongle`
      or `<home>/.gravity`.
 3. **USE a leading dot (`.<family>`) ONLY on user-exposed roots**:
-   - **Removable USB drive root**: `E:\.eschaton` (hidden from the user's top-level
+   - **Removable USB drive root**: `<drive root>/.<family>` (hidden from the user's top-level
      USB file listing; legacy `.eschaton-dongle` may be accepted as a read
      fallback).
    - **User `$HOME` / `%USERPROFILE%` root** (when `$HOME` is used directly as a
