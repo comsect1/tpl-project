@@ -19,15 +19,12 @@ from . import process
 from . import sync
 
 SCHEMA = "comsect1.maint_config.v1"
-ORIGIN_SCHEMA = "comsect1.template-origin.v1"
 CONFIG_RELATIVE = "20_ops/tools/maint_config.json"
-ORIGIN_RELATIVE = ".instructions/template-origin.json"
 
 WORD = re.compile(r"[a-z][a-z0-9]*")
 UPPER_WORD = re.compile(r"[A-Z][A-Z0-9]*")
 SYMBOL = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 ENVIRONMENT = re.compile(r"[A-Z][A-Z0-9_]*")
-COMMIT = re.compile(r"[0-9a-f]{7,40}")
 
 TOP_KEYS = {"schema", "product", "language", "registry", "host_build", "cross_build", "native_gate", "hooks"}
 PRODUCT_KEYS = {"id", "symbol_prefix", "environment_prefix", "image_record_product"}
@@ -261,16 +258,14 @@ def present():
 def origin(repo_root=None):
     """The template origin record of the product (`.instructions/template-origin.json`)."""
     repo_root = repo_root or process.REPO_ROOT
-    path = os.path.join(repo_root, *ORIGIN_RELATIVE.split("/"))
+    path = os.path.join(repo_root, *sync.ORIGIN_RELATIVE.split("/"))
     try:
         with open(path, "r", encoding="utf-8") as handle:
             record = json.load(handle)
     except (OSError, ValueError) as error:
         raise DriftError("template origin %s unreadable: %s" % (path, error))
-    if not (isinstance(record, dict) and record.get("schema") == ORIGIN_SCHEMA
-            and isinstance(record.get("template"), str) and record["template"]
-            and isinstance(record.get("baseline_commit"), str) and COMMIT.fullmatch(record["baseline_commit"])):
-        raise DriftError("template origin %s lacks schema %s, template or baseline_commit" % (path, ORIGIN_SCHEMA))
+    if not sync.origin_valid(record):
+        raise DriftError("template origin %s lacks schema %s, template or baseline_commit" % (path, sync.ORIGIN_SCHEMA))
     return record
 
 

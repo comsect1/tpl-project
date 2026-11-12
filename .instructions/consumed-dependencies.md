@@ -108,14 +108,14 @@ a Cell inside it is not a Cell of the consumer. Dated run records and issued
 evidence state what was run and are not rewritten when a location changes.
 
 The `url` that `.gitmodules` records for a submodule is the canonical remote
-URL of the dependency, in the form `git@github.com:<owner>/<repo>.git` for a
-repository hosted on GitHub, so that every workstation resolves the same
+URL that the hosting service publishes for the dependency, for example
+`git@<host>:<owner>/<repo>.git`, so that every workstation resolves the same
 tracked declaration. A workstation that reaches the remote through a
-per-account SSH host alias applies the alias locally, in its own Git
-configuration, with `git config --global url.<alias base>.insteadOf
-git@github.com:<owner>/`; a host alias, an account name or any other
-per-workstation rewrite never appears in `.gitmodules` or in any other tracked
-file. The maintainer tools read only the `path` of a `.gitmodules` entry and do
+per-account host alias applies the alias only in its own local Git
+configuration, with `url.<base>.insteadOf` (`git config --global
+url.<alias base>.insteadOf git@<host>:<owner>/`); a host alias, an account
+name or any other per-workstation rewrite never appears in `.gitmodules` or in
+any other tracked file. The maintainer tools read only the `path` of a `.gitmodules` entry and do
 not judge its `url`; this rule is enforced by review.
 
 Known open non-conformance: the maintainer tool configuration still requires

@@ -29,8 +29,10 @@ A repository that builds no C is not bound by sections 2 to 5.
 `20_ops/tools/comsect1_maint/reference_toolchain.json` is the only pin record:
 toolchain, version, bundle directory name, release tag, archive name and
 SHA-256, provenance file name and SHA-256. It is template-owned and reaches a
-repository only through the maintainer-tools synchronization
-(`sync.py --from`); a repository never edits or copies it by hand. A version
+repository only through the maintainer-tools synchronization (the
+template's `sync.py --from <template> --to <repository>`,
+[instruction layers](./instruction-layers.md)); a repository never edits or
+copies it by hand. A version
 change is one template commit followed by synchronization.
 
 ## 2. One location rule

@@ -29,9 +29,9 @@ Complete this checklist in the template-derived repository's first change:
 11. Confirm future template synchronization is configured to update common
     files while preserving `.instructions/kind/` and `.instructions/local/`.
     Synchronization also copies `20_ops/tools/comsect1_maint/`, the entry
-    shims and the common instruction files
-    (`comsect1_maint/sync.py --from <template checkout>`); `AGENTS.md` is
-    merged by hand. Follow the procedure of
+    shims and the common instruction files, run with the template's own
+    `sync.py`: `python -I -B <template>/20_ops/tools/comsect1_maint/sync.py
+    --from <template> --to <repository>`; `AGENTS.md` is merged by hand. Follow the procedure of
     [instruction layers](./instruction-layers.md) (template synchronization
     boundary) and record the template and its baseline commit in
     `.instructions/template-origin.json` (`comsect1.template-origin.v1`)

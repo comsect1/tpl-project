@@ -3,26 +3,20 @@
 This policy governs how Comsect1 products, tools, platforms, and foundations
 resolve their runtime home directories, role subdirectories, dot-prefix (`.`)
 conventions, and environment variable overrides across Windows, macOS, and
-Linux.
+Linux. Product-specific bindings (a product's family name, its role
+directories, its home variable) belong to that product's own local
+instructions.
 
 ## 1. Family Root Grouping (`<family>`)
 
 - Every runtime product family owns a single lowercase `kebab-case` family
-  directory (`<family>`):
-  - `eschaton` (`prd-tool-eschaton`)
-  - `orrery` (`prd-tool-orrery`)
-  - `gantry` (`prd-tool-gantry`)
-  - `halo` (`prd-fnd-halo`)
-  - `wsb` (`prd-plt-world-scope-bridge`)
-  - `data-comm-bridge` (`prd-plt-data-comm-bridge`)
-- Sub-daemons, celestians, or internal role directories (`authority`, `host`,
-  `container`, `client`, `gravity`, `armillary`, `quasar`, `sextant`,
-  `horologe`, `providers`, `logs`) **must never scatter** as top-level siblings
+  directory (`<family>`).
+- Sub-daemons or internal role directories (`<role>`, for
+  example `providers` or `logs`) **must never scatter** as top-level siblings
   in the OS base directory. They must reside strictly inside their owning
   `<family>/` root:
-  - `%LOCALAPPDATA%\eschaton\{authority,host,container,client}`
-  - `%LOCALAPPDATA%\orrery\{gravity,armillary,quasar,sextant,horologe}`
-- Never prepend a vendor folder (`comsect1/`) above `<family>` in OS runtime
+  - `%LOCALAPPDATA%\<family>\{<role>,<role>,...}`
+- Never prepend a vendor folder (`<vendor>/`) above `<family>` in OS runtime
   paths unless required by an external third-party host contract.
 
 ## 2. Platform Base Paths (Local-Only, No Roaming `%APPDATA%`)
@@ -49,15 +43,14 @@ paths and must be avoided.
      `%LOCALAPPDATA%\.<family>` or `$XDG_DATA_HOME/.<family>`.
 2. **NO leading dot on role subdirectories inside `<family>/`**:
    - Inside `<family>/`, role directories are already isolated in the product's
-     private namespace. Use `<home>/container`, `<home>/authority`,
-     `<home>/host`, `<home>/gravity` — **never** `<home>/container/.eschaton-dongle`
-     or `<home>/.gravity`.
+     private namespace. Use `<home>/<role>` — **never**
+     `<home>/<role>/.<name>` or `<home>/.<role>`.
 3. **USE a leading dot (`.<family>`) ONLY on user-exposed roots**:
    - **Removable USB drive root**: `<drive root>/.<family>` (hidden from the user's top-level
-     USB file listing; legacy `.eschaton-dongle` may be accepted as a read
-     fallback).
+     USB file listing; a product's earlier drive-root name, `.<earlier name>`,
+     may be accepted as a read fallback).
    - **User `$HOME` / `%USERPROFILE%` root** (when `$HOME` is used directly as a
-     portable workspace or fallback root): `~/.<family>` (e.g., `~/.gantry`).
+     portable workspace or fallback root): `~/.<family>`.
    - **Project / workspace root**: `.configs/`, `.instructions/`,
      `.claude-plugin/`.
 
@@ -68,8 +61,7 @@ following deterministic priority order:
 
 1. **Explicit CLI flag**: `--home <abs_path>` (or `--config-dir <abs_path>`)
 2. **Family home environment variable (`<FAMILY>_HOME`)**:
-   - `ESCHATON_HOME`, `ORRERY_HOME`, `GANTRY_HOME`, `HALO_HOME`,
-     `WSB_HOME`, `DCB_HOME`
+   - One variable per family, named by the product (`<FAMILY>_HOME`).
    - Maps directly to the single `<family>` root directory (`$<FAMILY>_HOME`).
 3. **OS Platform Default**: as defined in Section 2.
 
@@ -77,6 +69,6 @@ following deterministic priority order:
 
 - Every path supplied via `<FAMILY>_HOME`, `LOCALAPPDATA`, `USERPROFILE`,
   `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, or `HOME` **must be an absolute path**.
-- If an environment variable is set to a relative path (e.g., `ESCHATON_HOME=foo/bar`),
+- If an environment variable is set to a relative path (e.g., `<FAMILY>_HOME=foo/bar`),
   the resolver must **fail closed** with an explicit invalid-argument/configuration
   refusal rather than silently resolving against the current working directory.
