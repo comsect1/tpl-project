@@ -25,7 +25,9 @@ reads `comsect1_provider.h` of the Foundation checkout (`standard_include_root`)
 
 A consumed checkout (the Foundation of `host_build.standard_pin`, an adopted
 `external_headers` tree) is never locked: its pinned commit is recorded
-metadata. The tools resolve the checkout, read its HEAD and dirty state, record
+metadata. The Foundation is found at the pin's `root_variable` (an override) or
+else its declared `deps_path`, a Git submodule below `10_pkg/deps/`; the pin
+holds no local path. The tools resolve the checkout, read its HEAD and dirty state, record
 them beside the pinned commit (`standard_checkout`, `Cell.external_checkout`)
 and never refuse on a mismatch or a dirty tree. The object cache keys every
 compile by the bytes of the headers actually read, so correctness never rests
@@ -640,8 +642,26 @@ def observed_checkout(checkout):
     return dict(_OBSERVED_CHECKOUTS[checkout])
 
 
+# The Foundation pin: its declared checkout, a repository-relative folder below 10_pkg/deps/ (a Git
+# submodule); the removed key that held a local path.
+DEPS_PATH_KEY = "deps_path"
+DEPS_FOLDER = ("10_pkg", "deps")
+REMOVED_PIN_KEY = "local_root"
+
 # Resolved Foundation checkouts of this process: (pin path, pin bytes, override) -> standard_checkout.
 _STANDARD_CHECKOUTS = {}
+
+
+def _deps_path(value):
+    """The pin's deps_path when it is a repository-relative path with / separators below 10_pkg/deps/
+    that names a checkout folder; None otherwise."""
+    if not isinstance(value, str) or not value or value.startswith("/") or "\\" in value or ":" in value:
+        return None
+    parts = value.split("/")
+    if any(part in ("", ".", "..") for part in parts) or tuple(parts[:len(DEPS_FOLDER)]) != DEPS_FOLDER \
+            or len(parts) <= len(DEPS_FOLDER):
+        return None
+    return value
 
 
 def _standard_pin(settings):
@@ -658,18 +678,26 @@ def _standard_pin(settings):
              "the fnd-sdk-standard pin names no root_variable")
     _require(isinstance(pin.get("public_header"), str) and pin["public_header"],
              "the fnd-sdk-standard pin names no public_header")
-    _require(pin.get("local_root") is None or (isinstance(pin["local_root"], str) and os.path.isabs(pin["local_root"])),
-             "the fnd-sdk-standard pin local_root must be an absolute path")
+    _require(REMOVED_PIN_KEY not in pin,
+             "the fnd-sdk-standard pin %s holds %s: a pin holds no local path. Next step: remove %s, add the "
+             "Foundation as a Git submodule under %s/ and name it in %s (override with %s)."
+             % (pin_path, REMOVED_PIN_KEY, REMOVED_PIN_KEY, "/".join(DEPS_FOLDER), DEPS_PATH_KEY,
+                pin["root_variable"]))
+    _require(_deps_path(pin.get(DEPS_PATH_KEY)) is not None,
+             "the fnd-sdk-standard pin %s: %s must be a repository-relative path with / separators below %s/ "
+             "(found %r). Next step: name the Foundation submodule folder, e.g. %s/fnd-platform-architecture."
+             % (pin_path, DEPS_PATH_KEY, "/".join(DEPS_FOLDER), pin.get(DEPS_PATH_KEY), "/".join(DEPS_FOLDER)))
     return pin_path, pin_bytes, pin
 
 
 def standard_checkout(settings=None):
     """The Foundation checkout that supplies the fnd-sdk-standard, with its recorded identity.
 
-    The root is the directory named by the pin's root_variable, or, when that variable is unset or
-    empty, the pin's local_root. It must exist, lie outside this repository and hold the public header
+    The root is the directory named by the pin's root_variable (an override the machine supplies) or,
+    when that variable is unset or empty, the declared checkout deps_path below this repository's
+    10_pkg/deps/ (a Git submodule). Nothing else is searched. It must exist and hold the public header
     (fail closed: nothing can be compiled otherwise). The pin's commit is recorded metadata: the result
-    holds the root, its source (environment or local_root), the pinned commit, the observed HEAD and
+    holds the root, its source (environment or deps_path), the pinned commit, the observed HEAD and
     dirty state and whether HEAD equals the pin; a mismatch or a dirty tree is never refused. The
     result is reused for the same pin and override for the rest of the process."""
     settings = _settings(settings)
@@ -682,34 +710,37 @@ def standard_checkout(settings=None):
 
 
 def _resolve_standard_checkout(settings, pin, override):
-    source, root = ("environment", override) if override else ("local_root", pin.get("local_root") or "")
+    declared = settings.path_of(pin[DEPS_PATH_KEY])
+    source, root = ("environment", override) if override else (DEPS_PATH_KEY, declared)
     pinned = pin.get("commit") if isinstance(pin.get("commit"), str) else None
     pin_path = settings.path_of(settings.host_build["standard_pin"])
     details = {"root_variable": pin["root_variable"], "environment_value": override or None,
-               "local_root": pin.get("local_root"), "source": source, "pin": pin_path, "pinned_commit": pinned}
-    if not root or not os.path.isdir(root):
+               DEPS_PATH_KEY: pin[DEPS_PATH_KEY], "source": source, "root": root, "pin": pin_path,
+               "pinned_commit": pinned}
+    if override and not os.path.isdir(root):
         raise RegistryError(
-            "the fnd-sdk-standard checkout is not found: %s is %s and the pin's local_root is %s (pin %s, pinned "
-            "commit %s, recorded metadata). Next step: set %s to a fnd-platform-architecture checkout outside this "
-            "repository, or correct local_root in %s."
-            % (pin["root_variable"], "unset" if not override else "%s, not a directory" % override,
-               "absent" if not pin.get("local_root") else "%s%s" % (pin["local_root"], "" if os.path.isdir(
-                   pin["local_root"]) else ", not a directory"), pin_path, pinned, pin["root_variable"], pin_path),
+            "the fnd-sdk-standard checkout is not found: %s is %s, not a directory (pin %s, pinned commit %s, "
+            "recorded metadata). Next step: point %s at a fnd-platform-architecture checkout, or unset it to use "
+            "the declared checkout %s." % (pin["root_variable"], override, pin_path, pinned, pin["root_variable"],
+                                           declared),
+            details)
+    if not override and (not os.path.isdir(root) or not os.listdir(root)):
+        raise RegistryError(
+            "the fnd-sdk-standard checkout is not found: the declared checkout %s (%s %s of %s; %s is unset) is %s "
+            "(pinned commit %s, recorded metadata). Next step: run git submodule update --init %s, or set %s to a "
+            "fnd-platform-architecture checkout."
+            % (root, DEPS_PATH_KEY, pin[DEPS_PATH_KEY], pin_path, pin["root_variable"],
+               "empty" if os.path.isdir(root) else "missing", pinned, pin[DEPS_PATH_KEY], pin["root_variable"]),
             details)
     checkout = os.path.realpath(root)
-    if _inside(checkout, settings.repo_root):
-        raise RegistryError(
-            "the fnd-sdk-standard checkout %s (found through %s) lies inside this repository. Next step: point %s at a "
-            "checkout outside %s." % (checkout, source, pin["root_variable"], settings.repo_root),
-            dict(details, root=checkout))
     header = os.path.join(checkout, *pin["public_header"].split("/"))
     observed = observed_checkout(checkout)
     if not os.path.isfile(header):
         raise RegistryError(
             "the fnd-sdk-standard public header %s is missing in the checkout %s (found through %s; HEAD %s, dirty %s, "
-            "pinned commit %s). Next step: select a Foundation checkout that holds %s (%s or local_root of %s)."
-            % (header, checkout, source, observed["head"], observed["dirty"], pinned, pin["public_header"],
-               pin["root_variable"], pin_path),
+            "pinned commit %s). Next step: select a Foundation checkout that holds %s (git submodule update --init "
+            "%s, or %s)." % (header, checkout, source, observed["head"], observed["dirty"], pinned,
+                             pin["public_header"], pin[DEPS_PATH_KEY], pin["root_variable"]),
             dict(details, root=checkout, head=observed["head"], dirty=observed["dirty"], missing=header))
     return {"root": checkout, "source": source, "root_variable": pin["root_variable"],
             "include_root": os.path.dirname(header), "pinned_commit": pinned,

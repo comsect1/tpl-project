@@ -823,8 +823,8 @@ checkout was clean at exactly that commit; with the shared checkout at a newer
 HEAD no product could build.
 
 - `registry.standard_checkout` replaces the pin check: the root is the pin's
-  `root_variable` or its optional absolute `local_root`; it must exist, lie
-  outside the repository and hold the public header. HEAD and dirty state are
+  `root_variable` or else its declared in-repository `deps_path` (section 17);
+  it must exist and hold the public header. HEAD and dirty state are
   read once per process and recorded with the pinned commit and `matches_pin`;
   a mismatch or a dirty tree is never refused. The Foundation has no version
   notion (no release or tag), so no floor is defined.
@@ -843,8 +843,8 @@ HEAD no product could build.
   read from the resolved root.
 - Error handling (owner, same day: apart from ABI negotiation everything is a
   metadata-preserving read; strengthen error handling): the Foundation and
-  external checkout errors name the variable, its value, `local_root`, the pin
-  path, the pinned commit, the observed HEAD and dirty state and a next step,
+  external checkout errors name the variable, its value, the declared
+  `deps_path`, the pin path, the pinned commit, the observed HEAD and dirty state and a next step,
   and carry them as `RegistryError.details`. An ABI probe failure is measured
   again (`_abi_mismatch`: gcc names each size, offset and constant in its
   int-to-pointer diagnostic, so nothing is run) and reports expected and found
@@ -853,3 +853,34 @@ HEAD no product could build.
   the Foundation identity and the tools; a failed `cross_build` run writes
   `summary.json` the same way; unreadable metadata is a note. Export mismatch
   and Gate set errors name the paths, the release set and a next step.
+
+## 17. A dependency is reached through its declaration (r5, 2026-11-12)
+
+Owner decision 2026-11-12: no file in a repository contains an absolute path
+that lies outside the repository root, nor a relative path that leaves it; a
+repository reaches another repository only through a declared dependency
+(`.instructions/consumed-dependencies.md` section 6). The Foundation pin held an
+optional absolute `local_root`, and `registry.standard_checkout` refused a
+checkout inside the repository, so a product had to store a machine path.
+
+- The pin (`fnd_sdk_standard.json`) declares `deps_path`, the repository-relative
+  folder of the Foundation submodule below `10_pkg/deps/`
+  (`10_pkg/deps/fnd-platform-architecture`). It must use `/` separators, stay
+  below `10_pkg/deps/` and name a folder there: an absolute, drive,
+  backslash or `..` form fails closed. A pin that still holds `local_root` is a
+  configuration error: a pin holds no local path.
+- Resolution order, and nothing else: the pin's `root_variable` when the
+  environment sets it to a non-empty value (an override the machine supplies,
+  inside or outside the repository); otherwise `<repository root>/<deps_path>`.
+  The inside-the-repository refusal is removed for this resolution. A missing
+  or empty declared folder (an uninitialized submodule) fails closed with the
+  resolved path, how it was found, the pinned commit and the next step
+  `git submodule update --init <deps_path>` or setting the variable.
+- Records: `fnd_sdk_standard.source` is `environment` or `deps_path`; the
+  resolved `root` is recorded; no record or error `details` holds `local_root`.
+  The pinned commit, observed HEAD, dirty state and `matches_pin` stay
+  metadata, never a refusal.
+- `external_headers` is unchanged: its checkout is named only by its
+  environment variable and no path is stored.
+- Toolchain location settings (`host_build.compiler_bin_dir`, the reference
+  toolchain) are outside this step.

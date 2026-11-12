@@ -25,21 +25,24 @@ consumer, and a runtime engine admitting a Provider library, do not refuse on:
   and layout, Provider negotiate, the MCP protocol revision.
 - Data-format integrity needed to parse bytes safely: a frame checksum, a
   binary record or profile trailer that frames the bytes being read.
-- Structural resolution: the dependency is found, lies outside the consumer
-  repository, and holds the file the consumer includes or loads. Nothing can
+- Structural resolution: the dependency is found at its declared location
+  (section 6) and holds the file the consumer includes or loads. Nothing can
   be compiled or run otherwise.
 
 ## 3. Pins and digests are metadata
 
-A pin file (`10_pkg/components/*.json`) names where a dependency comes from
-and the commit it was last pinned at. A content digest covers the inside of a
-deliverable only, excluding its root folder name. Both are read and recorded
-for debugging, never a condition. The C build tools resolve the Foundation
-root from the pin's `root_variable` (override) or its optional absolute
-`local_root`, and record `fnd_sdk_standard` (root, source, `pinned_commit`,
-observed `head`, `dirty`, `matches_pin`) in `build_record.json` and the
-cross-build `summary.json`; an `external_headers` checkout is recorded the same
-way per result. The native Gate records the actual Gate binary digests beside
+A pin file (`10_pkg/components/*.json`) names the repository a dependency
+comes from, the commit it was last pinned at, the variable that overrides its
+location and its in-repository path (`deps_path`, below `10_pkg/deps/`); it
+holds no local path. A content digest covers the inside of a deliverable only,
+excluding its root folder name. Both are read and recorded for debugging,
+never a condition. The C build tools resolve the Foundation root from the
+pin's `root_variable` when the environment sets it to a non-empty value,
+otherwise from its `deps_path` below the repository root, and from nothing
+else; they record `fnd_sdk_standard` (root, source `environment` or
+`deps_path`, `pinned_commit`, observed `head`, `dirty`, `matches_pin`) in
+`build_record.json` and the cross-build `summary.json`; an `external_headers`
+checkout is recorded the same way per result. The native Gate records the actual Gate binary digests beside
 the recorded `expected_sha256` (`tool_sha256_differs`) and the toolchain
 manifest, member and semantic runtime digests with every difference
 (`native_toolchain`).
@@ -71,3 +74,21 @@ values, and one concrete next step. The same information is written into the
 build or run record of the failed run (`build_record.json` and the
 cross-build `summary.json` carry `result: failed`, `error` and `details`).
 Metadata that cannot be read is a note in the record, never a failure.
+
+## 6. Declaring a dependency on another repository
+
+Owner decision 2026-11-12: a repository names another repository's location
+in exactly one declared place, and in no other file:
+
+- a Git submodule under `10_pkg/deps/<name>` for source the consumer compiles
+  or imports (a pin file under `10_pkg/components/` may describe it), or
+- an installed deliverable resolved by its install path.
+
+Source, build files, scripts, tests and current documents reach the
+dependency by a path derived from the repository's own root or by a variable
+the declaration names. No file in a repository contains an absolute path that
+lies outside the repository root, nor a relative path that leaves it; paths
+inside the repository are unrestricted. A variable that overrides the
+declared location stays an override: the default comes from the declaration.
+Dated run records and issued evidence state what was run and are not
+rewritten when a location changes.
