@@ -32,8 +32,10 @@ reason on stderr (fail closed).
 A dependency Cell (registry key `dependency`: a Cell of a declared submodule
 below `10_pkg/deps/`) is cross-built like every freestanding arm Cell, from the
 checkout and with this product's flags, into this run directory; its archive
-carries the dependency's own name (`lib<identity>.a`) and its result keeps the
-checkout under `dependency`. Nothing is written below the checkout.
+carries the dependency's own name (`lib<identity>.a`). Every result whose
+compiled units hold a dependency Cell (the Cell itself, or a Cell that depends
+on it) keeps the checkout of each under `dependency_cells`, and so does the
+run. Nothing is written below the checkout.
 
 The standard (`c_standard`, ISO/IEC 9899:2018) is verified by value before any
 unit compiles: once per distinct core, Cell and common flag set, a one-line
@@ -339,9 +341,14 @@ def _build_run(run_id, make_archive, tools, cores, cells, run_dir, tmp_dir, obje
                     for part, value in zip(("text", "data", "bss"), total) if value > limits[part]]
             if over:
                 raise CrossBuildError("Cell %s on %s exceeds its budget: %s" % (cell_name, core, ", ".join(over)))
-        if cell.dependency is not None:
-            # The checkout of a dependency Cell (metadata, never a condition).
-            record["results"][-1]["dependency"] = cell.dependency_record()
+        # The checkout of every dependency Cell among the compiled units, whether selected itself or
+        # compiled into a Cell that depends on it (metadata, never a condition).
+        states = [unit.dependency_record() for unit in cell.dependency_closure() + [cell]
+                  if unit.dependency is not None]
+        if states:
+            record["results"][-1]["dependency_cells"] = states
+            record.setdefault("dependency_cells", [])
+            record["dependency_cells"] += [state for state in states if state not in record["dependency_cells"]]
         if cell.external_headers is not None:
             external, configs = cell.external_roots(core)
             record["results"][-1]["external_headers"] = {

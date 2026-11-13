@@ -211,6 +211,7 @@ class Cell:
         # A dependency Cell (DEPENDENCY_KEY): the declared submodule path that holds it, else None.
         self.dependency = entry.get(DEPENDENCY_KEY)
         if DEPENDENCY_KEY in entry:
+            _require_dependency_path(name, self.dependency)
             refused = sorted(DEPENDENCY_REFUSED_KEYS & set(entry))
             _require(not refused, "Cell %s: a dependency Cell declares no %s: its tests, fixtures, bindings and "
                      "adopted vocabulary belong to its own repository (%s %r)"
@@ -323,6 +324,7 @@ class Cell:
                      "product whose family it serves (path %r)" % (name, self.path))
             self.dependency_checkout = dependency_checkout(self.dependency, settings, name)
             self.root = os.path.join(settings.path_of(self.dependency), *CELL_FOLDER, *segments)
+            require_unlinked_cell(name, self.dependency, settings.path_of(self.dependency), self.root)
             manifest_path = os.path.join(self.root, MANIFEST_FILE)
             _require(os.path.isfile(manifest_path),
                      "Cell %s: %s has no %s: the dependency %s declares no Cell at %s. Next step: correct the path to "
@@ -633,14 +635,15 @@ class Cell:
         """The recorded identity of a dependency Cell's checkout (None for a Cell of this repository):
         the Cell and its published identity, the declared submodule path, the checkout and Cell roots,
         the pin file under 10_pkg/components/ that names the same deps_path with its commit (None
-        without exactly one such pin), the observed HEAD, dirty state and note, and whether HEAD
-        equals the pin. Metadata only: a mismatch or a dirty tree is never refused."""
+        without exactly one such pin; pin_note says why when the folder is unreadable or several
+        pins name the path), the observed HEAD, dirty state and note, and whether HEAD equals the pin. Metadata only: a mismatch or a dirty tree is never refused."""
         if self.dependency is None:
             return None
         observed = observed_checkout(self.dependency_checkout)
-        pin_path, pinned = _dependency_pin(self.settings, self.dependency)
+        pin_path, pinned, pin_note = _dependency_pin(self.settings, self.dependency)
         return {"cell": self.name, "identity": self.stem, DEPS_PATH_KEY: self.dependency, "source": SOURCE_DECLARED,
                 "root": self.dependency_checkout, "cell_root": self.root, "pin": pin_path, "pinned_commit": pinned,
+                "pin_note": pin_note,
                 "head": observed["head"], "dirty": observed["dirty"], "note": observed["note"],
                 "matches_pin": observed["head"] is not None and observed["head"] == pinned}
 
@@ -774,9 +777,15 @@ def _dependency_publication(manifest_path, name):
     return surface["identity"], surface["path"]
 
 
+# git never takes an optional lock for a query: `git status` then leaves the index of a consumed checkout
+# as it is instead of refreshing its cached file states (a write below the checkout).
+GIT_READ_ONLY_OPTION = "--no-optional-locks"
+
+
 def _git(checkout, arguments):
     try:
-        done = subprocess.run(["git", "-C", checkout] + arguments, capture_output=True, text=True,
+        done = subprocess.run(["git", GIT_READ_ONLY_OPTION, "-C", checkout] + arguments, capture_output=True,
+                              text=True,
                               stdin=subprocess.DEVNULL, timeout=60, creationflags=process.window_flags())
     except (OSError, subprocess.TimeoutExpired) as error:
         raise RegistryError("git on %s failed: %s" % (checkout, error))
@@ -815,15 +824,44 @@ def dependency_checkout_root(path, repo_root, what, found, details):
     return checkout
 
 
+def _require_dependency_path(name, deps_path):
+    """Fail closed unless the `dependency` value of the Cell `name` is a valid deps_path: a present key is
+    never read as an absent one."""
+    defect = _deps_path_defect(deps_path)
+    _require(defect is None, "Cell %s: %s %r is invalid: %s. Next step: name the submodule folder of the dependency "
+             "below %s/." % (name, DEPENDENCY_KEY, deps_path, defect, "/".join(DEPS_FOLDER)))
+
+
+def require_unlinked_cell(name, deps_path, checkout, cell_root):
+    """Fail closed unless the dependency Cell at `cell_root` is read only from inside its checkout: no
+    folder from the checkout down to the Cell root and no folder or file below the Cell root (its
+    manifest, sources and headers) is a link or reparse point, and the Cell root lies in the checkout."""
+    def refuse(path):
+        raise RegistryError(
+            "Cell %s: %s is a link or reparse point: a dependency Cell is read only from the files of its "
+            "declared checkout %s, never through a link out of it. Next step: restore the tracked content of the "
+            "submodule, or select a commit of the dependency that holds the folder or file itself."
+            % (name, path, deps_path), {DEPS_PATH_KEY: deps_path, "root": checkout, "link": path})
+
+    current = checkout
+    for part in os.path.relpath(cell_root, checkout).split(os.sep):
+        current = os.path.join(current, part)
+        if process.is_link(current):
+            refuse(current)
+    for directory, names, files in os.walk(cell_root):
+        for entry in sorted(names) + sorted(files):
+            if process.is_link(os.path.join(directory, entry)):
+                refuse(os.path.join(directory, entry))
+    _require(not os.path.lexists(cell_root) or _inside(cell_root, checkout),
+             "Cell %s: %s lies outside its declared checkout %s" % (name, cell_root, checkout))
+
+
 def dependency_checkout(deps_path, settings, name):
     """The real path of the declared checkout that holds the dependency Cell `name`: `deps_path` is a
     submodule path that the repository's .gitmodules lists below 10_pkg/deps/, the folder exists and
     holds an entry, and no component of it is a link or reparse point (fail closed, each with its
     reason and next step). The checkout's commit and dirty state are not conditions."""
-    what = "Cell %s: %s %r" % (name, DEPENDENCY_KEY, deps_path)
-    defect = _deps_path_defect(deps_path)
-    _require(defect is None, "%s is invalid: %s. Next step: name the submodule folder of the dependency below %s/."
-             % (what, defect, "/".join(DEPS_FOLDER)))
+    _require_dependency_path(name, deps_path)
     gitmodules = os.path.join(settings.repo_root, GITMODULES_FILE)
     root = settings.path_of(deps_path)
     details = {DEPS_PATH_KEY: deps_path, "source": SOURCE_DECLARED, "root": root, "gitmodules": gitmodules}
@@ -847,11 +885,18 @@ def dependency_checkout(deps_path, settings, name):
 
 
 def _dependency_pin(settings, deps_path):
-    """(pin file, pinned commit) of the one pin under 10_pkg/components/ whose deps_path names the
-    submodule, or (None, None) without exactly one. Recorded metadata: an unreadable file is skipped."""
+    """(pin file, pinned commit, note) of the one pin under 10_pkg/components/ whose deps_path names the
+    submodule: (None, None, None) without one, and (None, None, note) when the folder cannot be listed or
+    several pins name the path. Recorded metadata, never a failure: an unreadable file is skipped."""
     folder = os.path.join(settings.repo_root, *COMPONENTS_FOLDER)
+    if not os.path.isdir(folder):
+        return None, None, None
+    try:
+        file_names = sorted(os.listdir(folder))
+    except OSError as error:
+        return None, None, "the pin folder %s is not readable: %s" % (folder, error)
     found = []
-    for file_name in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
+    for file_name in file_names:
         if not file_name.endswith(".json"):
             continue
         path = os.path.join(folder, file_name)
@@ -861,8 +906,11 @@ def _dependency_pin(settings, deps_path):
         except (OSError, ValueError):
             continue
         if isinstance(pin, dict) and pin.get(DEPS_PATH_KEY) == deps_path:
-            found.append((path, pin["commit"] if isinstance(pin.get("commit"), str) else None))
-    return found[0] if len(found) == 1 else (None, None)
+            found.append((path, pin["commit"] if isinstance(pin.get("commit"), str) else None, None))
+    if len(found) > 1:
+        return None, None, ("%d pins name %s %s (%s): none is taken as its pin"
+                            % (len(found), DEPS_PATH_KEY, deps_path, ", ".join(path for path, _, _ in found)))
+    return found[0] if found else (None, None, None)
 
 
 def _git_observation(checkout, arguments):
@@ -915,7 +963,18 @@ SOURCE_DECLARED = DEPS_PATH_KEY
 # trailing dot (Windows drops a trailing dot or space, so "x." would alias "x").
 DEPS_SEGMENT_PATTERN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9_-])?")
 GITMODULES_FILE = ".gitmodules"
-GITMODULES_PATH_PATTERN = re.compile(r"^[ \t]*path[ \t]*=[ \t]*(.*?)[ \t]*$", re.MULTILINE)
+# .gitmodules is a Git configuration file. Only what a submodule path needs is read: the sections
+# `[submodule "<name>"]` (section name without case, a backslash escaping the next character of <name>),
+# their `path` key (without case), and its value with quotes, escapes and a trailing `#` or `;` comment
+# outside quotes.
+GITMODULES_SECTION = "submodule"
+GITMODULES_PATH_KEY = "path"
+GITMODULES_SECTION_PATTERN = re.compile(r'\[[ \t]*([A-Za-z0-9.-]+)(?:[ \t]+"((?:[^"\\]|\\.)*)")?[ \t]*\]')
+GITMODULES_KEY_PATTERN = re.compile(r"([A-Za-z][A-Za-z0-9-]*)[ \t]*(=?)")
+GITMODULES_ESCAPE = "\\"
+GITMODULES_ESCAPES = {"n": "\n", "t": "\t", "b": "\b", GITMODULES_ESCAPE: GITMODULES_ESCAPE, '"': '"'}
+GITMODULES_COMMENTS = "#;"
+GITMODULES_BLANKS = " \t"
 SUBMODULE_INIT_STEP = "git submodule update --init %s"
 SUBMODULE_ADD_STEP = "git submodule add %s %s"
 # The repository a pin names when it names none (the pin's "repository" key is recorded metadata).
@@ -949,10 +1008,87 @@ def _submodule_paths(repo_root):
     try:
         _require(os.path.isfile(path) and not process.is_link(path), "%s is not a regular file" % path)
         with open(path, "r", encoding="utf-8") as handle:
-            return set(GITMODULES_PATH_PATTERN.findall(handle.read()))
+            text = handle.read()
     except (OSError, ValueError, RegistryError) as error:
         raise RegistryError("the submodule declarations %s are unreadable: %s. Next step: repair %s."
                             % (path, error, GITMODULES_FILE))
+    try:
+        declared = _gitmodules_paths(text)
+    except ValueError as error:
+        raise RegistryError("the submodule declarations %s are invalid: %s. Next step: repair %s."
+                            % (path, error, GITMODULES_FILE))
+    owners = {}
+    for name, value in declared.items():
+        owners.setdefault(value, []).append(name)
+    clashes = ["path %s is declared by the submodules %s" % (value, " and ".join('"%s"' % name for name in names))
+               for value, names in sorted(owners.items()) if len(names) > 1]
+    _require(not clashes, "the submodule declarations %s are invalid: %s: one folder is one submodule. Next step: "
+             "repair %s." % (path, "; ".join(clashes), GITMODULES_FILE))
+    return set(owners)
+
+
+def _gitmodules_value(text):
+    """The value of one configuration entry (the text after `=`): blanks around it dropped, quotes removed,
+    escapes replaced, and a `#` or `;` comment outside quotes cut. ValueError names what cannot be read."""
+    value = []
+    blanks = []  # blanks outside quotes, kept only when more of the value follows
+    quoted = False
+    index = 0
+    text = text.lstrip(GITMODULES_BLANKS)
+    while index < len(text):
+        character = text[index]
+        if not quoted and character in GITMODULES_COMMENTS:
+            break
+        if not quoted and character in GITMODULES_BLANKS:
+            blanks.append(character)
+            index += 1
+            continue
+        value += blanks
+        blanks = []
+        if character == GITMODULES_ESCAPE:
+            if index + 1 == len(text):
+                raise ValueError("a value continued over the line end is not read")
+            if text[index + 1] not in GITMODULES_ESCAPES:
+                raise ValueError("unknown escape %s%s" % (GITMODULES_ESCAPE, text[index + 1]))
+            value.append(GITMODULES_ESCAPES[text[index + 1]])
+            index += 1
+        elif character == '"':
+            quoted = not quoted
+        else:
+            value.append(character)
+        index += 1
+    if quoted:
+        raise ValueError("unterminated quoted value")
+    return "".join(value)
+
+
+def _gitmodules_paths(text):
+    """{submodule name: path} of the text of a .gitmodules file; a later entry of one name replaces an
+    earlier one, as Git reads it. ValueError names the line that cannot be read."""
+    paths = {}
+    section = None  # the name of the submodule section the line belongs to, else None
+    for number, line in enumerate(text.split("\n"), 1):
+        rest = line.strip(GITMODULES_BLANKS + "\r")
+        if rest.startswith("["):
+            header = GITMODULES_SECTION_PATTERN.match(rest)
+            if header is None:
+                raise ValueError("malformed section header at line %d" % number)
+            section = None
+            if header.group(1).lower() == GITMODULES_SECTION and header.group(2) is not None:
+                section = re.sub(r"\\(.)", r"\1", header.group(2))
+            rest = rest[header.end():].lstrip(GITMODULES_BLANKS)
+        if not rest or rest[0] in GITMODULES_COMMENTS:
+            continue
+        key = GITMODULES_KEY_PATTERN.match(rest)
+        if key is None:
+            raise ValueError("malformed entry at line %d" % number)
+        if section is None or key.group(1).lower() != GITMODULES_PATH_KEY or not key.group(2):
+            continue
+        try:
+            paths[section] = _gitmodules_value(rest[key.end():])
+        except ValueError as error:
+            raise ValueError("%s at line %d" % (error, number))
+    return paths
 
 
 def _folder_state(path):

@@ -4,6 +4,7 @@
 archives from where it is. Registry acceptance and every named refusal, the recorded checkout, the
 deliverables, the Gate set, and one host and one cross build with the real compilers (skipped without)."""
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -33,6 +34,8 @@ SOURCES = ["core/gate/smo_pacer_gate.c", "membrane/xpt_pacer.c"]
 # The value the dependent computes through the dependency Cell: PACER_STEP added to twice the argument.
 ARGUMENT = 3
 EXPECTED_TOTAL = 13
+# How far a tracked file's time stamp is moved from the one the index recorded, in seconds.
+INDEX_AGE_SECONDS = 10
 
 GCC_BIN = os.environ.get("COMSECT1_TEST_GCC_BIN", r"C:\msys64\ucrt64\bin")
 GCC = os.path.join(GCC_BIN, "gcc.exe" if os.name == "nt" else "gcc")
@@ -284,8 +287,8 @@ class DependencyCellTest(unittest.TestCase):
         self.assertEqual(record, {"cell": "pacer", "identity": "pacer", "deps_path": DEPS_PATH, "source": "deps_path",
                                   "root": os.path.realpath(str(checkout)),
                                   "cell_root": os.path.join(str(root), *CELL_ROOT.split("/")),
-                                  "pin": None, "pinned_commit": None, "head": head, "dirty": False, "note": None,
-                                  "matches_pin": False})
+                                  "pin": None, "pinned_commit": None, "pin_note": None, "head": head, "dirty": False,
+                                  "note": None, "matches_pin": False})
         self.write_pin(root, head)
         with mock.patch.dict(registry._OBSERVED_CHECKOUTS, clear=True):
             record = registry.load_registry(settings)["cells"]["pacer"].dependency_record()
@@ -412,6 +415,19 @@ class DependencyCellTest(unittest.TestCase):
                 self.assertEqual(tree(checkout), before)
                 self.assertFalse(any(name.endswith(".def") for name in before))
 
+    def cross_patches(self, settings):
+        """One context that points cross_build at the Arm toolchain and the fixture's common flags."""
+        def tool(name):
+            return os.path.join(ARM_BIN, os.path.basename(ARM_GCC).replace("gcc", name))
+
+        stack = contextlib.ExitStack()
+        for name, value in (("TOOLCHAIN_BIN_DIR", ARM_BIN), ("GCC_PATH", ARM_GCC), ("AR_PATH", tool("ar")),
+                            ("SIZE_PATH", tool("size")), ("NM_PATH", tool("nm")),
+                            ("COMMON_FLAGS", list(settings.cross_build["common_flags"]))):
+            stack.enter_context(mock.patch.object(cross, name, value))
+        stack.enter_context(mock.patch.object(registry, "standard_record", return_value=None))
+        return stack
+
     def test_cross_build_selects_the_dependency_cell_under_its_own_archive_name(self):
         _root, cells = self.cells("cross_names")
         settings = cells["pacer"].settings
@@ -429,14 +445,7 @@ class DependencyCellTest(unittest.TestCase):
         run_dir = root / "90_temps" / "build" / "cross" / "run-1"
         (run_dir / "tmp").mkdir(parents=True)
 
-        def tool(name):
-            return os.path.join(ARM_BIN, os.path.basename(ARM_GCC).replace("gcc", name))
-
-        with mock.patch.object(cross, "TOOLCHAIN_BIN_DIR", ARM_BIN), mock.patch.object(cross, "GCC_PATH", ARM_GCC), \
-                mock.patch.object(cross, "AR_PATH", tool("ar")), mock.patch.object(cross, "SIZE_PATH", tool("size")), \
-                mock.patch.object(cross, "NM_PATH", tool("nm")), \
-                mock.patch.object(cross, "COMMON_FLAGS", list(settings.cross_build["common_flags"])), \
-                mock.patch.object(registry, "standard_record", return_value=None):
+        with self.cross_patches(settings):
             _run_dir, record = cross._build_run("run-1", True, {"template": None}, cores, selected, str(run_dir),
                                                 str(run_dir / "tmp"), "run", 1)
         results = {result["cell"]: result for result in record["results"]}
@@ -445,10 +454,263 @@ class DependencyCellTest(unittest.TestCase):
         deliverables = selected[1].dependency_deliverables()
         self.assertTrue((run_dir / deliverables["archives"]["cortex-m4"]).is_file())
         self.assertEqual((results["pacer"]["sources"], results["pacer"]["external"]), (SOURCES, []))
-        self.assertEqual((results["pacer"]["dependency"]["deps_path"], results["app"]["depends_on"]),
-                         (DEPS_PATH, ["pacer"]))
-        self.assertNotIn("dependency", results["app"])
+        self.assertEqual(results["app"]["depends_on"], ["pacer"])
+        # Every result whose compiled units hold a dependency Cell keeps its checkout, and so does the run.
+        for name in ("pacer", "app"):
+            state, = results[name]["dependency_cells"]
+            self.assertEqual((state["cell"], state["deps_path"]), ("pacer", DEPS_PATH))
+        self.assertEqual(record["dependency_cells"], results["pacer"]["dependency_cells"])
         self.assertEqual(tree(checkout), before)
+
+    @unittest.skipUnless(os.path.isfile(ARM_GCC), "the Arm toolchain is absent")
+    def test_cross_build_of_a_dependent_alone_records_the_dependency_checkout(self):
+        root = self.work.folder("cross_dependent")
+        settings = consumer(root)
+        cores, selected = cross.selected_cells("app", settings)
+        self.assertEqual([cell.name for cell in selected], ["app"])
+        run_dir = root / "90_temps" / "build" / "cross" / "run-1"
+        (run_dir / "tmp").mkdir(parents=True)
+        with self.cross_patches(settings):
+            _run_dir, record = cross._build_run("run-1", True, {"template": None}, cores, selected, str(run_dir),
+                                                str(run_dir / "tmp"), "run", 1)
+        result, = record["results"]
+        self.assertEqual((result["cell"], result["archive"]), ("app", "app/cortex-m4/libdcb_app.a"))
+        state, = result["dependency_cells"]
+        self.assertEqual((state["cell"], state["identity"], state["deps_path"], state["pinned_commit"],
+                          state["matches_pin"]), ("pacer", "pacer", DEPS_PATH, None, False))
+        for key in ("root", "cell_root", "head", "dirty", "note", "pin", "pin_note"):
+            self.assertIn(key, state)
+        self.assertEqual(record["dependency_cells"], [state])
+
+    def junction(self, link, target):
+        """A directory junction (or symbolic link) `link` to `target`, removed again after the test."""
+        try:
+            os.symlink(str(target), str(link), target_is_directory=True)
+        except (OSError, NotImplementedError):
+            try:
+                import _winapi
+                _winapi.CreateJunction(str(target), str(link))
+            except (ImportError, AttributeError, OSError):
+                self.skipTest("this platform cannot create a symbolic link or a junction")
+        self.addCleanup(lambda: os.path.lexists(str(link)) and (os.rmdir if os.name == "nt" else os.unlink)(str(link)))
+
+    def link_refusal(self, settings, link):
+        with self.assertRaises(registry.RegistryError) as caught:
+            registry.load_registry(settings)
+        for part in ("Cell pacer", "is a link or reparse point", str(link), DEPS_PATH, "Next step"):
+            self.assertIn(part, str(caught.exception))
+
+    def test_linked_cell_root_inside_the_checkout_is_refused(self):
+        outside = self.work.folder("link_root_outside")
+        dependency(outside)
+        root = self.work.folder("link_root")
+        settings = consumer(root, checkout=False)
+        checkout = root.joinpath(*DEPS_PATH.split("/"))
+        support.write(checkout / "LICENSE.md", "fixture licence\n")
+        (checkout / "10_pkg" / "c").mkdir(parents=True)
+        link = root.joinpath(*CELL_ROOT.split("/"))
+        self.junction(link, outside.joinpath(*CELL_ROOT.split("/")))
+        self.link_refusal(settings, link)
+
+    def test_linked_folder_below_the_cell_root_is_refused(self):
+        outside = self.work.folder("link_folder_outside")
+        dependency(outside)
+        root = self.work.folder("link_folder")
+        settings = consumer(root)
+        cell = root.joinpath(*CELL_ROOT.split("/"))
+        for name in ("smo_pacer_gate.c", "smo_pacer_gate.h"):
+            os.remove(str(cell / "core" / "gate" / name))
+        os.rmdir(str(cell / "core" / "gate"))
+        link = cell / "core" / "gate"
+        self.junction(link, outside.joinpath(*CELL_ROOT.split("/")) / "core" / "gate")
+        self.link_refusal(settings, link)
+
+    def test_linked_input_file_of_the_cell_is_refused(self):
+        outside = self.work.folder("link_file_outside")
+        dependency(outside)
+        for relative in ("membrane/xpt_pacer.h", "core/gate/smo_pacer_gate.c", "comsect1.json"):
+            with self.subTest(file=relative):
+                root = self.work.folder("link_file_%s" % relative.split("/")[-1].split(".")[0])
+                settings = consumer(root)
+                link = root.joinpath(*CELL_ROOT.split("/")).joinpath(*relative.split("/"))
+                os.remove(str(link))
+                try:
+                    os.symlink(str(outside.joinpath(*CELL_ROOT.split("/")).joinpath(*relative.split("/"))), str(link))
+                except (OSError, NotImplementedError) as error:
+                    self.skipTest("this account cannot create a file symbolic link without privilege: %s" % error)
+                self.addCleanup(lambda path=link: os.path.lexists(str(path)) and os.unlink(str(path)))
+                self.link_refusal(settings, link)
+
+    def test_null_dependency_is_refused_and_never_read_as_a_local_cell(self):
+        root = self.work.folder("null")
+        cells = entries()
+        cells["pacer"]["dependency"] = None
+        settings = consumer(root, cells=cells)
+        support.c_cell(root, "pacer", "dcb")
+        with self.assertRaises(registry.RegistryError) as caught:
+            registry.load_registry(settings)
+        for part in ("Cell pacer: dependency None is invalid", "it must be a non-empty string", "Next step"):
+            self.assertIn(part, str(caught.exception))
+
+    def test_submodule_declarations_follow_the_git_configuration_rules(self):
+        root = self.work.folder("gitmodules")
+        path = "10_pkg/deps/lib-pacer"
+        accepted = (('[submodule "a"]\n\tpath = %s\n' % path, {path}),
+                    ('[submodule "a"]\n\tpath = "%s"\n' % path, {path}),
+                    ('[submodule "a"]\n\tPATH = %s # a comment\n' % path, {path}),
+                    ('[submodule "a"]\n\tpath = %s ; a comment\n' % path, {path}),
+                    ('[SubModule "a"]\n  path="%s"   \n' % path, {path}),
+                    ('[submodule "a"] path = %s\n\turl = x\n' % path, {path}),
+                    ('# head\n[submodule "a"]\n\turl = "x # y"\n\tpath = "10_pkg/deps/a # b"\n', {"10_pkg/deps/a # b"}),
+                    ('[submodule "a"]\n\tpath = "10_pkg/deps/a\\\\b\\"c"\n', {'10_pkg/deps/a\\b"c'}),
+                    ('[submodule "a"]\n\tpath = 10_pkg/deps/a  b\n', {"10_pkg/deps/a  b"}),
+                    ('[submodule "a"]\n\tpath = 10_pkg/deps/x\n[submodule "a"]\n\tpath = %s\n' % path, {path}),
+                    ('[submodule "a"]\n\tpath = 10_pkg/deps/x\n[submodule "b"]\n\tpath = %s\n' % path,
+                     {"10_pkg/deps/x", path}),
+                    ('[other]\n\tpath = %s\n' % path, set()),
+                    ('[submodule]\n\tpath = %s\n' % path, set()),
+                    ('[submodule "a"]\n\turl = x\n[core]\n\tpath = %s\n' % path, set()),
+                    ('[submodule "a"]\n\tpathology = %s\n' % path, set()))
+        for index, (text, expected) in enumerate(accepted):
+            with self.subTest(index=index, text=text):
+                support.write(root / ".gitmodules", text)
+                self.assertEqual(registry._submodule_paths(str(root)), expected)
+        refused = (('[submodule "a"]\n\tpath = %s\n[submodule "b"]\n\tpath = %s\n' % (path, path),
+                    ("declared by the submodules", '"a"', '"b"', path)),
+                   ('[submodule "a"]\n\tpath = "%s\n' % path, ("unterminated quoted value", "line 2")),
+                   ('[submodule "a"]\n\tpath = %s\\\n' % path, ("continued over the line end", "line 2")),
+                   ('[submodule "a"\n\tpath = %s\n' % path, ("malformed section header", "line 1")))
+        for index, (text, parts) in enumerate(refused):
+            with self.subTest(index=index, text=text):
+                support.write(root / ".gitmodules", text)
+                with self.assertRaises(registry.RegistryError) as caught:
+                    registry._submodule_paths(str(root))
+                for part in parts + (str(root / ".gitmodules"), "Next step"):
+                    self.assertIn(part, str(caught.exception))
+
+    def test_dependency_declared_outside_a_submodule_section_or_quoted(self):
+        root = self.work.folder("gitmodules_section")
+        settings = consumer(root)
+        support.write(root / ".gitmodules", '[other]\n\tpath = %s\n' % DEPS_PATH)
+        with self.assertRaisesRegex(registry.RegistryError, "lists no submodule at that path"):
+            registry.load_registry(settings)
+        support.write(root / ".gitmodules", '[submodule "lib-pacer"]\n\tpath = "%s" # the library\n' % DEPS_PATH)
+        self.assertEqual(registry.load_registry(settings)["cells"]["pacer"].dependency, DEPS_PATH)
+
+    def test_state_query_writes_nothing_into_the_checkout(self):
+        _root, settings, checkout = self.checkout_product("index")
+        index = checkout / ".git" / "index"
+        tracked = checkout / "LICENSE.md"
+        later = os.stat(str(tracked)).st_mtime + INDEX_AGE_SECONDS
+        os.utime(str(tracked), (later, later))
+        before = (index.read_bytes(), os.stat(str(index)).st_mtime_ns, tree(checkout))
+        with mock.patch.dict(registry._OBSERVED_CHECKOUTS, clear=True):
+            record = registry.load_registry(settings)["cells"]["pacer"].dependency_record()
+        self.assertEqual((record["dirty"], record["note"]), (False, None))
+        self.assertEqual(record["head"], registry._git(str(checkout), ["rev-parse", "HEAD"]))
+        self.assertFalse((checkout / ".git" / "index.lock").exists())
+        self.assertEqual((index.read_bytes(), os.stat(str(index)).st_mtime_ns, tree(checkout)), before)
+
+    def test_absent_git_is_recorded_as_unknown(self):
+        _root, cells = self.cells("no_git")
+        with mock.patch.dict(registry._OBSERVED_CHECKOUTS, clear=True), \
+                mock.patch.object(registry.subprocess, "run", side_effect=FileNotFoundError("git")):
+            record = cells["pacer"].dependency_record()
+        self.assertEqual((record["head"], record["dirty"], record["matches_pin"]), (None, None, False))
+        self.assertIn("no Git work tree", record["note"])
+
+    def test_unreadable_or_ambiguous_pins_are_a_note(self):
+        root, cells = self.cells("pin_note")
+        self.write_pin(root, "f" * 40)
+        components = os.path.join(str(root), "10_pkg", "components")
+        listdir = os.listdir
+
+        def denied(path):
+            if os.path.normcase(str(path)) == os.path.normcase(components):
+                raise PermissionError("denied")
+            return listdir(path)
+
+        with mock.patch.object(registry.os, "listdir", side_effect=denied):
+            record = cells["pacer"].dependency_record()
+        self.assertEqual((record["pin"], record["pinned_commit"], record["matches_pin"]), (None, None, False))
+        for part in ("denied", components):
+            self.assertIn(part, record["pin_note"])
+        record = cells["pacer"].dependency_record()
+        self.assertEqual((record["pinned_commit"], record["pin_note"]), ("f" * 40, None))
+        support.write(root / "10_pkg" / "components" / "second.json",
+                      json.dumps({"deps_path": DEPS_PATH, "commit": "e" * 40}) + "\n")
+        record = cells["pacer"].dependency_record()
+        self.assertEqual((record["pin"], record["pinned_commit"]), (None, None))
+        for part in ("lib_pacer.json", "second.json", DEPS_PATH):
+            self.assertIn(part, record["pin_note"])
+
+    SCANNED = ("int pacer_keep(void);\n"
+               "int\npacer_split(void);\n"
+               "extern const char *\n    pacer_name(int index,\n               int other);\n"
+               "static inline int pacer_id(int x) { return x; }\n"
+               "static int pacer_private(void);\n"
+               "inline int pacer_inline(int x) { return x; }\n"
+               "int pacer_defined(void)\n{\n    return 0;\n}\n"
+               "typedef int (*pacer_callback)(int);\n"
+               "typedef int pacer_function(int);\n"
+               "struct pacer_ops { int (*pacer_member)(void); int pacer_field; };\n"
+               "extern pacer_handle (*pacer_hook)(void);\n"
+               "extern int pacer_table[PACER_SIZE(3)];\n"
+               "int other_open(void);\n"
+               "void pacer_last(struct pacer_ops *ops, int (*callback)(int));\n")
+
+    def test_exports_are_the_external_function_declarations_only(self):
+        self.assertEqual(build.declared_functions(self.SCANNED, "pacer_"),
+                         ["pacer_keep", "pacer_split", "pacer_name", "pacer_last"])
+        self.assertEqual(build.declared_functions("#ifdef __cplusplus\nextern \"C\" {\n#endif\nint pacer_open(void);\n"
+                                                  "#ifdef __cplusplus\n}\n#endif\n", "pacer_"), ["pacer_open"])
+        root, cells = self.cells("scanned")
+        support.write(root.joinpath(*MEMBRANE.split("/")) / "xpt_pacer.h", "/* int pacer_hidden(void); */\n" + self.SCANNED)
+        self.assertEqual(build.header_functions(cells["pacer"]), ["pacer_keep", "pacer_split", "pacer_name", "pacer_last"])
+        marked = ('# 1 "wrapper.c"\n# 1 "%s" 1\nint pacer_keep(void);\n# 1 "other.h" 1\nint pacer_other(void);\n'
+                  '# 3 "%s" 2\nint\npacer_split(void);\n# 2 "wrapper.c" 2\nint pacer_wrapper(void);\n')
+        header = os.path.join(cells["pacer"].root, "membrane", "xpt_pacer.h")
+        for spelling in (header, header.replace("\\", "/"), header.replace("\\", "\\\\")):
+            with self.subTest(spelling=spelling):
+                self.assertEqual(build.header_text(marked % (spelling, spelling), header),
+                                 "int pacer_keep(void);\nint\npacer_split(void);\n")
+
+    @unittest.skipUnless(os.path.isfile(GCC), "gcc is absent")
+    def test_host_build_exports_what_the_preprocessed_dependency_header_declares(self):
+        root = self.work.folder("host_preprocessed")
+        cells = entries()
+        cells["app"]["exports"] = ["app", "pacer"]
+        settings = consumer(root, cells=cells)
+        cell = root.joinpath(*CELL_ROOT.split("/"))
+        support.write(cell / "membrane" / "xpt_pacer.h",
+                      "#ifndef XPT_PACER_H\n#define XPT_PACER_H\n#include \"../contract/pvo_pacer_link.h\"\n"
+                      "#define PACER_OPERATION(name) int pacer_gate_##name(int value)\n"
+                      "int pacer_gate_sum(int first, int second);\n"
+                      "int\npacer_gate_twice(int value);\n"
+                      "PACER_OPERATION(half);\n"
+                      "#ifdef PACER_ABSENT_OPTION\nint pacer_gate_absent(int value);\n#endif\n"
+                      "static inline int pacer_gate_same(int value) { return value; }\n#endif\n")
+        support.write(cell / "membrane" / "xpt_pacer.c",
+                      "#include \"xpt_pacer.h\"\n#include \"core/gate/smo_pacer_gate.h\"\n"
+                      "int pacer_gate_sum(int first, int second)\n{\n    return smo_pacer_gate_sum(first, second);\n}\n"
+                      "int pacer_gate_twice(int value)\n{\n    return smo_pacer_gate_sum(value, pacer_gate_same(value));\n}\n"
+                      "int pacer_gate_half(int value)\n{\n    return value / 2;\n}\n")
+        before = tree(root.joinpath(*DEPS_PATH.split("/")))
+        patches = self.host_patches(settings)
+        for patch in patches:
+            patch.start()
+        try:
+            build.build_library("app", "run-1", object_cache_mode="run", jobs=1)
+        finally:
+            for patch in reversed(patches):
+                patch.stop()
+        run_dir = root / "90_temps" / "build" / "app" / "run-1"
+        record = json.loads((run_dir / "build_record.json").read_text(encoding="utf-8"))
+        self.assertEqual(record["exported"], ["dcb_app_total", "pacer_gate_half", "pacer_gate_sum", "pacer_gate_twice"])
+        self.assertEqual((run_dir / "dcb_app.def").read_text(encoding="utf-8"),
+                         "LIBRARY dcb_app.dll\nEXPORTS\n    dcb_app_total\n    pacer_gate_sum\n    pacer_gate_twice\n"
+                         "    pacer_gate_half\n")
+        self.assertEqual(tree(root.joinpath(*DEPS_PATH.split("/"))), before)
 
 
 if __name__ == "__main__":

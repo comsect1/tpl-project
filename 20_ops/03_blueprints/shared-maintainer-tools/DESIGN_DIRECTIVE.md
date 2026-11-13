@@ -952,8 +952,29 @@ libraries and archives without copying it. The common rules are
   uninitialized checkout, link component, missing manifest, language,
   publication or public header. The commit and the dirty state are recorded
   with the pin under `10_pkg/components/` that names the same `deps_path`
-  (`Cell.dependency_record`: `dependency_cells` in `build_record.json`,
-  `dependency` per result in `summary.json`).
+  (`Cell.dependency_record`: `dependency_cells` in `build_record.json`, and
+  in `summary.json` per result and per run, for every dependency Cell among
+  the compiled units, so a run that selects only a dependent records it).
+- Read only from inside the checkout: `registry.require_unlinked_cell`
+  refuses a link or reparse point from the checkout down to the Cell root
+  and at every folder and file below it. Every Git query runs with
+  `--no-optional-locks`, so `git status` does not refresh the index of a
+  consumed checkout (measured: without it the index bytes change after a
+  tracked file's time stamp moves). This holds for the Foundation and
+  `external_headers` checkouts as well.
+- `.gitmodules` is read by the Git configuration rules instead of a line
+  pattern, for the Foundation pin and the dependency Cell alike. Changed
+  behaviour: a `path` outside a `[submodule "<name>"]` section no longer
+  declares a submodule; a quoted value and a value followed by a comment
+  are now read; a path declared by two submodules is refused.
+- Export derivation (`host_build.declared_functions`): the list comes from
+  the public header as `gcc -E` preprocesses it under the Cell's flags,
+  restricted by the line markers to the header's own text, and holds the
+  file-scope declarations of functions with external linkage that are no
+  definitions. The former line pattern missed a declaration whose name
+  starts a line and took a `static inline` definition. Over the 51 public
+  headers of the five registered repositories at hand the former and the
+  new list are equal, as written and preprocessed.
 - `gate.py` and `build.py` refuse the entry itself; `registry.authored_cells`
   is the set of Cells the consumer builds a library for, tests and submits.
 - `Cell.dependency_deliverables` is the read-only packaging view.

@@ -6,6 +6,10 @@ Python standard library only. The library is a product artifact: the exported
 symbol set equals the functions declared in the Cell's public membrane header
 (`membrane/xpt_*.h`): the functions named `<prefix>_<cell>_*`, or, for a Cell
 that declares `function_prefix` in the registry, those named with that prefix.
+The list is taken from the header as the compiler preprocesses it under the
+Cell's flags: every file-scope declaration of a function with external linkage
+that is no definition (no `static` or `inline` definition, typedef, pointer to
+a function or struct member), wherever its lines break.
 The ABI mirror `10_pkg/test/c/<path>/<prefix>_<cell>_abi.py` is checked by the C compiler with a compile-only `_Static_assert` probe. No
 executable is ever produced. All output goes to `90_temps/build/<cell>/<run-id>/`.
 The Cell list, standard, definitions, include roots and dependencies come from
@@ -299,17 +303,152 @@ def _strip_comments(text):
     return re.sub(r"/\*.*?\*/|//[^\n]*", "", text, flags=re.DOTALL)
 
 
-def header_functions(cell):
-    """Function names declared in the public header, in declaration order. A Provider Cell's public header
-    may declare none: its static registration is its whole surface."""
+# A preprocessor directive with its continuation lines (a header read without the preprocessor).
+DIRECTIVE_PATTERN = re.compile(r"^[ \t]*#[^\n]*(?:\\\n[^\n]*)*", re.MULTILINE)
+# The C++ linkage block of a header read without the preprocessor: its braces enclose file-scope declarations.
+LINKAGE_BLOCK_PATTERN = re.compile(r'\bextern\s*"C"\s*\{?')
+# A line marker of `gcc -E` output: `# <line> "<file>" <flags>`.
+LINE_MARKER_PATTERN = re.compile(r'^#(?:line)?[ \t]+\d+[ \t]+"((?:[^"\\]|\\.)*)"')
+C_TOKEN_PATTERN = re.compile(r"[A-Za-z_]\w*|\S")
+C_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z_]\w*")
+# Specifiers whose declaration is no exported function: a type name and internal linkage.
+UNEXPORTED_SPECIFIERS = ("typedef", "static")
+# Words whose parenthesized argument is no parameter list: attributes, alignment and static assertions.
+ARGUMENT_WORDS = ("__attribute__", "__attribute", "__declspec", "__asm__", "__asm", "_Alignas", "alignas",
+                  "_Static_assert", "static_assert")
+# The first token of a parenthesized declarator: a pointer (or block) to a function, not a function.
+POINTER_DECLARATORS = ("*", "^")
+
+
+def _group_end(tokens, start):
+    """The index of the token that closes the parenthesis opened at `start`, or None."""
+    depth = 0
+    for index in range(start, len(tokens)):
+        if tokens[index] == "(":
+            depth += 1
+        elif tokens[index] == ")":
+            depth -= 1
+            if depth == 0:
+                return index
+    return None
+
+
+def _declared_function(statement, prefix):
+    """The name a file-scope declaration (its tokens, without the final `;`) declares as a function with
+    external linkage and the prefix, or None: no typedef, no static declaration, no pointer to a
+    function, no object; the identifier directly before the parameter list is the name."""
+    if any(word in statement for word in UNEXPORTED_SPECIFIERS):
+        return None
+    index = 0
+    brackets = 0
+    while index < len(statement):
+        token = statement[index]
+        if token == "[":
+            brackets += 1
+        elif token == "]":
+            brackets -= 1
+        elif token == "(" and brackets == 0:
+            end = _group_end(statement, index)
+            if end is None:
+                return None
+            if index and statement[index - 1] in ARGUMENT_WORDS:
+                index = end
+            else:
+                name = statement[index - 1] if index else ""
+                declarator_follows = end + 1 < len(statement) and statement[end + 1] in ("(", "[")
+                if index < 2 or C_IDENTIFIER_PATTERN.fullmatch(name) is None or not name.startswith(prefix) \
+                        or statement[index + 1] in POINTER_DECLARATORS or declarator_follows:
+                    return None
+                return name
+        index += 1
+    return None
+
+
+def declared_functions(text, prefix):
+    """The functions with external linkage that C text declares at file scope without defining them, whose
+    name starts with `prefix`, in declaration order (a repeated declaration repeats the name).
+
+    `text` is a header as the compiler preprocessed it, or as written: comments, directives and the C++
+    linkage block are then dropped here. A declaration may span lines. A function definition (static,
+    inline or plain), a static declaration, a typedef, a pointer to a function, an object and the member
+    of a struct, union or enum body declare no exported function."""
+    text = LINKAGE_BLOCK_PATTERN.sub(" ", DIRECTIVE_PATTERN.sub("", _strip_comments(text)))
+    names = []
+    statement = []
+    depth = 0
+    opened_after = None  # the token before the file-scope brace group being skipped
+    for token in C_TOKEN_PATTERN.findall(text):
+        if token == "{":
+            if depth == 0:
+                opened_after = statement[-1] if statement else None
+            depth += 1
+        elif token == "}":
+            # A closing brace at file scope ends the C++ linkage block of a header read as written.
+            if depth:
+                depth -= 1
+                if depth == 0 and opened_after == ")":
+                    statement = []  # the body of a function definition: no declaration to export
+        elif depth == 0:
+            if token == ";":
+                name = _declared_function(statement, prefix)
+                if name is not None:
+                    names.append(name)
+                statement = []
+            else:
+                statement.append(token)
+    return names
+
+
+def header_text(preprocessed, header_path):
+    """The lines of `gcc -E` output that come from the file `header_path` itself, by the line markers: the
+    text of the headers it includes and of the unit that includes it is left out."""
+    wanted = os.path.normcase(os.path.normpath(header_path))
+    lines = []
+    selected = False
+    for line in preprocessed.splitlines():
+        marker = LINE_MARKER_PATTERN.match(line)
+        if marker is not None:
+            origin = marker.group(1).replace("\\\\", "\\").replace('\\"', '"')
+            selected = os.path.normcase(os.path.normpath(origin)) == wanted
+        elif selected:
+            lines.append(line + "\n")
+    return "".join(lines)
+
+
+def header_functions(cell, preprocessed=None):
+    """Function names the public header declares for export, in declaration order (declared_functions with
+    the Cell's function prefix). `preprocessed` is the `gcc -E` output of a unit that includes the header
+    under the Cell's flags, which the build passes (_exported_functions): macros are expanded and only the
+    selected conditional branches remain. Without it the header is read as written. A Provider Cell's
+    public header may declare none: its static registration is its whole surface."""
     header_path = os.path.join(cell.root, cell.public_header)
-    with open(header_path, "r", encoding="utf-8") as handle:
-        text = _strip_comments(handle.read())
-    names = re.findall(r"^[A-Za-z_][\w \t\*]*?\b(%s\w+)[ \t]*\(" % re.escape(cell.function_prefix),
-                       text, flags=re.MULTILINE)
+    if preprocessed is None:
+        with open(header_path, "r", encoding="utf-8") as handle:
+            text = handle.read()
+    else:
+        text = header_text(preprocessed, header_path)
+    names = declared_functions(text, cell.function_prefix)
     if (not names and not cell.provider) or len(set(names)) != len(names):
         raise BuildError("public header yields no function set or a duplicate: %s" % header_path)
     return names
+
+
+def _exported_functions(exported_cells, env, run_dir):
+    """The export list of a library: the functions of the public header of every exported Cell, each header
+    preprocessed by the compiler under its own Cell's flags and include roots (a one-line unit of the run
+    directory includes it; nothing is compiled and nothing is written beside the header)."""
+    functions = []
+    for exported in exported_cells:
+        header_path = os.path.join(exported.root, *exported.public_header.split("/"))
+        unit_path = os.path.join(run_dir, "tmp", "export_%s.c" % exported.name)
+        with open(unit_path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write('#include "%s"\n' % header_path.replace("\\", "/"))
+        done = _run(_unit_flags(exported) + ["-E"] + _unit_includes(exported) + [unit_path], env, run_dir,
+                    "preprocess the public header of %s" % exported.name)
+        functions.extend(header_functions(exported, done.stdout))
+    if len(set(functions)) != len(functions):
+        raise BuildError("the exported public headers declare a function twice")
+    return functions
 
 
 def _load_abi(cell):
@@ -844,11 +983,6 @@ def build_library(cell_name, run_id, sanitize=None, accept_tool_drift=False, obj
         if not os.path.isfile(os.path.join(exported.root, exported.public_header)):
             raise BuildError("Cell file missing: %s/%s" % (exported.name, exported.public_header))
 
-    functions = []
-    for exported in cell.exported_cells():
-        functions.extend(header_functions(exported))
-    if len(set(functions)) != len(functions):
-        raise BuildError("the exported public headers declare a function twice")
     abis = {probe_cell.name: _load_abi(probe_cell) for probe_cell in probed}
 
     run_dir = os.path.join(cell.build_root, run_id)
@@ -864,7 +998,7 @@ def build_library(cell_name, run_id, sanitize=None, accept_tool_drift=False, obj
         raise BuildError("run directory already exists: %s" % run_dir)
     try:
         return _build_in_run(cell, linked, run_id, run_dir, sanitize, cache, cache_before, tools, probed, abis,
-                             functions, jobs)
+                             jobs)
     except (BuildError, RegistryError) as error:
         _write_failure_record(run_dir, run_id, cell, error, cache, cache_before, tools)
         raise
@@ -889,8 +1023,7 @@ def _write_failure_record(run_dir, run_id, cell, error, cache, cache_before, too
         sys.stderr.write("build: note: the failure record could not be written: %s\n" % note)
 
 
-def _build_in_run(cell, linked, run_id, run_dir, sanitize, cache, cache_before, tools, probed, abis, functions,
-                  jobs):
+def _build_in_run(cell, linked, run_id, run_dir, sanitize, cache, cache_before, tools, probed, abis, jobs):
     settings = _settings()
     tmp_dir = os.path.join(run_dir, "tmp")
     os.mkdir(tmp_dir)
@@ -907,6 +1040,8 @@ def _build_in_run(cell, linked, run_id, run_dir, sanitize, cache, cache_before, 
         if unit_cell not in standard_cells:
             standard_cells.append(unit_cell)
     standard_record = _verify_standard(standard_cells, env, run_dir, msvc_paths, msvc_env)
+    # The export list: what the compiler sees each exported public header declare under the Cell's flags.
+    functions = _exported_functions(cell.exported_cells(), env, run_dir)
 
     # ABI probes: compile only (-fsyntax-only), so no object or executable exists. One probe per
     # probed Cell, built with that Cell's own flags and include roots; the probes run in parallel.
