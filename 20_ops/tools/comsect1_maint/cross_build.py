@@ -29,6 +29,12 @@ once) must be unique (registry.require_unique_symbols) for the image without a
 platform Cell and for each platform's image. Any failure exits non-zero with a
 reason on stderr (fail closed).
 
+The standard (`c_standard`, ISO/IEC 9899:2018) is verified by value before any
+unit compiles: once per distinct core, Cell and common flag set, a one-line
+probe is preprocessed and the run fails closed unless `__STDC_VERSION__`
+expands to the value of the standard; `summary.json` keeps every probe under
+`c_standard`.
+
 Build speed (`.instructions/build-optimization.md`): every (Cell, core, unit)
 compile with its `size` and `nm` listings runs on `--jobs` worker threads
 (default: the logical processors) through the object cache (`object_cache`,
@@ -45,6 +51,7 @@ import os
 import subprocess
 import sys
 
+from . import c_standard
 from . import config as maint_config
 from . import object_cache
 from . import process
@@ -68,7 +75,12 @@ COMMON_FLAGS = list(_CROSS["common_flags"]) if _CROSS else None
 
 
 class CrossBuildError(Exception):
-    """A step failed; the message is the reason."""
+    """A step failed; the message is the reason. `details` (a dict) holds what the failure summary keeps
+    beside the message."""
+
+    def __init__(self, message, details=None):
+        super().__init__(message)
+        self.details = details or {}
 
 
 def new_run_id():
@@ -180,6 +192,25 @@ def _write_failure_summary(run_dir, run_id, error, tools):
         print("cross_build: note: the failure summary could not be written: %s" % note, file=sys.stderr)
 
 
+def _verify_standard(flag_sets, env, tmp_dir):
+    """Verify the standard of every distinct flag set of the run by value: preprocess the one-line probe
+    and refuse unless __STDC_VERSION__ expands to the standard's value. `flag_sets` holds (label, flags)
+    in compile order; returns the `c_standard` member of summary.json (c_standard.run_record)."""
+    probe_path = os.path.join(tmp_dir, c_standard.PROBE_FILE_NAME)
+    with open(probe_path, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(c_standard.PROBE_SOURCE)
+    probes = {}
+    for label, flags in flag_sets:
+        command = [GCC_PATH] + c_standard.PREPROCESS_FLAGS + list(flags) + [probe_path]
+        if tuple(command) in probes:
+            continue
+        record = c_standard.verification(command, run_tool(command, env, "C standard probe of %s" % label).stdout)
+        if not record["verified"]:
+            raise CrossBuildError(c_standard.mismatch(label, record), {"c_standard": c_standard.run_record([record])})
+        probes[tuple(command)] = record
+    return c_standard.run_record(list(probes.values()))
+
+
 def _build_run(run_id, make_archive, tools, cores, cells, run_dir, tmp_dir, object_cache_mode, jobs):
     env = dict(os.environ)
     env["PATH"] = TOOLCHAIN_BIN_DIR + os.pathsep + env.get("PATH", "")
@@ -213,6 +244,7 @@ def _build_run(run_id, make_archive, tools, cores, cells, run_dir, tmp_dir, obje
     record = {"compiler": GCC_PATH, "compiler_version": version, "common_flags": COMMON_FLAGS,
               "run_id": run_id, "result": "passed", "results": [], "unique_external_symbols": {}}
     external_by_core = {}  # core -> {unit label: external symbols}, each unit once
+    standard_flag_sets = []  # (label, the flags that can select a standard), in compile order
 
     for cell in cells:
         cell_name = cell.name
@@ -229,6 +261,8 @@ def _build_run(run_id, make_archive, tools, cores, cells, run_dir, tmp_dir, obje
                 unit_flags = ["-std=%s" % unit_cell.standard]
                 if unit_cell.targets["arm"]["gate"]["plain_char"] == "unsigned":
                     unit_flags.append("-funsigned-char")
+                standard_flag_sets.append(("Cell %s on %s" % (unit_cell.name, core),
+                                           core_flags + unit_flags + COMMON_FLAGS + unit_cell.definition_flags()))
                 includes = []
                 for root in unit_cell.include_roots:
                     includes.append("-I" + os.path.normpath(os.path.join(unit_cell.root, root)))
@@ -252,6 +286,7 @@ def _build_run(run_id, make_archive, tools, cores, cells, run_dir, tmp_dir, obje
                     compile_jobs.append((key, core, command, source_path, object_path))
             plan.append((cell, core, core_flags, out_dir, unit_jobs))
 
+    record["c_standard"] = _verify_standard(standard_flag_sets, env, tmp_dir)
     results = iter(process.ordered_map(compile_unit, compile_jobs, jobs))
     for cell, core, core_flags, out_dir, unit_jobs in plan:
         cell_name = cell.name

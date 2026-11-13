@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Kim Hyeongjeong (comsect1)
-"""native_gate.load_config: no toolchain member, C23 only, replaced members refused by name, publications optional."""
+"""native_gate.load_config: no toolchain member, one standard only, replaced members refused by name, publications optional."""
 import json
 import unittest
 
@@ -71,16 +71,19 @@ class LaneConfigTest(unittest.TestCase):
         for text in ("comsect1-gate.exe", "release set set-a", "Next step"):
             self.assertIn(text, caught.exception.message)
 
-    def test_analysis_standard_is_the_c23_build_standard_without_downgrade(self):
-        config = self.load(BASE, "c23")
-        self.assertIn("-std=c23", driver.compile_flags(config, []))
-        for standard in ("c99", "c11", "c17", "c2y"):
-            with self.subTest(standard=standard), self.assertRaisesRegex(driver.ToolError, "no downgrade"):
+    def test_analysis_standard_is_the_one_build_standard_without_downgrade(self):
+        config = self.load(BASE, "c17")
+        self.assertIn("-std=c17", driver.compile_flags(config, []))
+        for standard in ("c99", "c11", "c18", "gnu17", "c23", "c2y"):
+            with self.subTest(standard=standard), self.assertRaises(driver.ToolError) as caught:
                 self.load(dict(BASE, build=dict(BASE["build"], standard=standard)), standard)
+            for text in ("no downgrade", "ISO/IEC 9899:2018 (C17/C18)", 'write "c17"'):
+                self.assertIn(text, caught.exception.message)
         for name, value in (("c17_only", ["c99", "c11", "c17"]), ("with_c23", ["c99", "c11", "c17", "c23"])):
             with self.subTest(frontend=name), self.assertRaises(driver.ToolError) as caught:
                 self.load(dict(BASE, gate_set=dict(BASE["gate_set"], frontend_standards=value)), name)
             self.assertIn("delete gate_set.frontend_standards", caught.exception.message)
+            self.assertIn("ISO/IEC 9899:2018", caught.exception.message)
 
     def test_unknown_member_is_refused(self):
         with self.assertRaisesRegex(driver.ToolError, "exactly the members"):

@@ -38,7 +38,7 @@ class HostBuildErrorTest(unittest.TestCase):
                                     CONSTANTS={"X_LIMIT": 9})
         with mock.patch.object(build, "GCC_PATH", GCC), mock.patch.object(build, "GCC_BIN_DIR", GCC_BIN):
             env = build._child_env(str(run_dir / "tmp"))
-            error = build._abi_mismatch(cell, abi, [GCC, "-std=c23", "-fsyntax-only", "-I", str(root)], env,
+            error = build._abi_mismatch(cell, abi, [GCC, "-std=c17", "-fsyntax-only", "-I", str(root)], env,
                                         str(run_dir), build.BuildError("probe failed"))
         differs = error.details["abi_mismatch"]["differs"]
         self.assertEqual(differs["sizeof(x_frame)"], {"expected": 12, "found": 16})

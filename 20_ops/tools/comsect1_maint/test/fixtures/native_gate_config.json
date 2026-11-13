@@ -18,7 +18,7 @@
   },
   "build": {
     "target": "x86_64-pc-windows-msvc",
-    "standard": "c23",
+    "standard": "c17",
     "plain_char": "signed",
     "virtual_root": "C:/native",
     "preprocessing_epoch_seconds": 0,

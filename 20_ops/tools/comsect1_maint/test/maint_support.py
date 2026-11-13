@@ -45,6 +45,7 @@ def load_file(path, name):
 
 process = package_module("process")
 config = package_module("config")
+c_standard = package_module("c_standard")
 
 
 class Run:
@@ -92,7 +93,7 @@ def c_cell(product, path, prefix, header=True, contract="pvo_%s.h", manifest=Non
 
 
 def c_entry(path, targets=("windows",), **extra):
-    entry = {"path": path, "standard": "c23", "definitions": {}, "include_roots": ["."], "depends_on": [],
+    entry = {"path": path, "standard": c_standard.C_STANDARD, "definitions": {}, "include_roots": ["."], "depends_on": [],
              "freestanding": True, "targets": {}}
     for target in targets:
         entry["targets"][target] = {"gate": {"target": "x86_64-pc-windows-msvc", "plain_char": "signed"}}

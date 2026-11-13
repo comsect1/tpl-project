@@ -2,8 +2,8 @@
 # Copyright 2026 Kim Hyeongjeong (comsect1)
 """Shared maintainer tools of the Comsect1 project template (common layer, synchronized verbatim).
 
-Modules: `path_guard`, `process`, `config`, `sync`, `registry`, `native_gate`,
-`cross_build`, `host_build`, `gate`. A product selects behaviour through
+Modules: `path_guard`, `process`, `config`, `sync`, `c_standard`, `registry`,
+`native_gate`, `cross_build`, `host_build`, `gate`. A product selects behaviour through
 `20_ops/tools/maint_config.json` and optional `product_hooks.py`, never by
 editing this package. The package carries no version of its own: the product's
 `.instructions/template-origin.json` records the template revision it came

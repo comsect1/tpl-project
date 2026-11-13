@@ -32,9 +32,13 @@ inventory resource headers; the manifest digest, each member's size and
 SHA-256 and the semantic runtime digest are read and recorded, with every
 difference from the pin and the manifest, in `native_toolchain`, never
 refused). A missing bundle fails closed; there is no discovery.
-The analysis standard is the build standard, and the build standard is C23
-(`C_STANDARD`). There is no downgrade: a frontend that cannot analyse C23
-fails the lane closed with the Gate's own message.
+The analysis standard is the build standard, and the build standard is the one
+standard of `c_standard` (ISO/IEC 9899:2018, token `c17`). There is no
+downgrade: a frontend that cannot analyse it fails the lane closed with the
+Gate's own message. Before the native lane analyses, the pinned clang
+preprocesses a one-line probe with the lane's flags and the lane fails closed
+unless `__STDC_VERSION__` expands to the standard's value; the observed value
+is recorded as `c_standard` in `summary.json`.
 `publications` (optional) selects the input owner protocol: when the member is
 present (even `[]`), each `comsect1-native-input` call names the original
 source Cells of its external inputs (`--source-cell`) and the selected SDK
@@ -80,6 +84,7 @@ import re
 import sys
 from pathlib import Path
 
+from . import c_standard
 from . import config as maint_config
 from . import path_guard as _path_guard
 from . import process
@@ -108,16 +113,14 @@ EXIT_NAMES = {
 }
 
 TOOL_KEYS = ("gate", "native_input", "c_frontend", "libclang")
-# The one ISO C edition of every Cell: C23 (ISO/IEC 9899:2024), owner rule 2026-11-02.
-C_STANDARD = "c23"
 CONFIG_KEYS = ("gate_set", "expected_sha256", "build", "timeouts_seconds")
 GATE_SET_KEYS = ("runtime_root", "active_set_file", "binary_subdirectory", "binaries")
 # Members that earlier configurations carried and the current rule replaces: each is refused by name.
 REPLACED_MEMBERS = {
     "clang_resource": "the toolchain comes from the synchronized reference toolchain pin "
                       "(comsect1_maint/reference_toolchain.json); delete clang_resource",
-    "frontend_standards": "the analysis standard is the build standard C23 with no downgrade; "
-                          "delete gate_set.frontend_standards",
+    "frontend_standards": "the analysis standard is the build standard %s with no downgrade; "
+                          "delete gate_set.frontend_standards" % c_standard.title(),
 }
 RUN_ID_PATTERN = process.RUN_ID_PATTERN
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
@@ -210,8 +213,8 @@ def load_config(path):
                                 "external_include_roots", "system_include_roots"))
     for key in ("target", "virtual_root"):
         require(isinstance(build[key], str) and build[key], "build.%s must be a non-empty string" % key)
-    require(build["standard"] == C_STANDARD,
-            "build.standard is %r; every Cell is analysed as %s, with no downgrade" % (build["standard"], C_STANDARD))
+    require(build["standard"] == c_standard.C_STANDARD,
+            c_standard.token_refusal("build.standard", build["standard"]) + "; the analysis has no downgrade")
     require(build["plain_char"] in ("signed", "unsigned"), "build.plain_char must be signed or unsigned")
     require(isinstance(build["preprocessing_epoch_seconds"], int) and not isinstance(build["preprocessing_epoch_seconds"], bool)
             and build["preprocessing_epoch_seconds"] >= 0, "build.preprocessing_epoch_seconds must be a non-negative integer")
@@ -592,6 +595,21 @@ def compile_flags(config, roots):
     return flags
 
 
+def verify_standard(config, clang, run_dir):
+    """Preprocess the one-line probe with the lane's flags and refuse the lane unless __STDC_VERSION__
+    expands to the standard's value; the probe record is kept for summary.json (`c_standard`)."""
+    probe = Path(run_dir) / c_standard.PROBE_FILE_NAME
+    write_text(probe, c_standard.PROBE_SOURCE)
+    command = [clang] + compile_flags(config, []) + c_standard.PREPROCESS_FLAGS + ["-nostdinc", probe]
+    code, out, err = run_process("clang -E (C standard probe)", command, config["timeouts_seconds"]["clang"], run_dir)
+    if code != 0:
+        raise ToolError(EXIT_PLAN_FAILED, "the C standard probe failed: %s" % err.strip())
+    record = c_standard.verification(command, out)
+    config["_c_standard"] = c_standard.run_record([record])
+    if not record["verified"]:
+        raise ToolError(EXIT_PLAN_FAILED, c_standard.mismatch("the native lane", record))
+
+
 def header_closure(config, clang, resource_include, roots, entry, cwd):
     command = [clang] + compile_flags(config, roots) + ["-M", "-nostdinc", "-isystem", resource_include]
     for system_root in system_directories(config):
@@ -893,6 +911,7 @@ def run(arguments):
         for lane in lanes:
             try:
                 if lane == "native":
+                    verify_standard(config, clang, run_dir)
                     results[lane] = run_native_lane(config, paths, cell, units, clang, resource_include, run_dir / "native")
                 else:
                     results[lane] = run_plain_lane(config, paths, cell, run_dir / "plain")
@@ -913,6 +932,8 @@ def run(arguments):
         }
         if clang is not None:
             summary["native_toolchain"] = config["_native_toolchain"]
+        if "_c_standard" in config:
+            summary["c_standard"] = config["_c_standard"]
         summary["maintainer_tools"] = tools
         summary["lanes"] = results
         write_json(run_dir / "summary.json", summary)

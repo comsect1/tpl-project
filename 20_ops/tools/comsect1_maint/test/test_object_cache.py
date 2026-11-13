@@ -110,7 +110,7 @@ class CompileTest(unittest.TestCase):
         return cache_module.ObjectCache(self.root, str(support.REPO_ROOT))
 
     def command(self, output, extra=()):
-        return [GCC, "-std=c23", "-O2", "-ffunction-sections", "-fno-ident"] + list(extra) + [
+        return [GCC, "-std=c17", "-O2", "-ffunction-sections", "-fno-ident"] + list(extra) + [
             "-I", str(self.early), "-I", str(self.inc), "-c", "-o", output, self.source]
 
     def build(self, cache, extra=(), identity=None):
@@ -333,7 +333,7 @@ def run(argv):
 identity = cache_module.toolchain_identity(gcc, env)
 cache = cache_module.ObjectCache(root, repo)
 early = os.path.join(os.path.dirname(inc), "early")
-command = [gcc, "-std=c23", "-O2", "-ffunction-sections", "-fno-ident", "-I", early, "-I", inc, "-c", "-o", output, source]
+command = [gcc, "-std=c17", "-O2", "-ffunction-sections", "-fno-ident", "-I", early, "-I", inc, "-c", "-o", output, source]
 cache.compile(command, output, source, env, run, scratch, identity, "test")
 '''
 

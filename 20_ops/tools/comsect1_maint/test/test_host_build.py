@@ -74,7 +74,7 @@ class HostBuildTest(unittest.TestCase):
         self.assertEqual(build._response_file(str(path), ["/Ia b", 'x"y']), "@" + str(path))
         self.assertEqual(path.read_text(encoding="utf-8"), '"/Ia b"\n"x\\"y"\n')
         command = build._msvc_unit_command({"cl": "cl.exe"}, self.cells["engine"], ["-I", "a", "-I", "b c"], ["/c"])
-        self.assertEqual(command, ["cl.exe", "/nologo", "/std:clatest", "/TC", "/W4", "/WX", "/Ia", "/Ib c", "/c"])
+        self.assertEqual(command, ["cl.exe", "/nologo", "/std:c17", "/TC", "/W4", "/WX", "/Ia", "/Ib c", "/c"])
         with self.assertRaisesRegex(build.BuildError, "unexpected include"):
             build._msvc_unit_command({"cl": "cl.exe"}, self.cells["engine"], ["-isystem", "a"], [])
 

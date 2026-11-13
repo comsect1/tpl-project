@@ -4,7 +4,8 @@
 
 Python standard library only. Language `c`: the registry is the single list of
 Cells, per Cell the path, the language standard, the definitions, the include
-roots, the dependencies, the freestanding flag and the supported targets.
+roots, the dependencies, the freestanding flag and the supported targets. The
+standard is the one token of `c_standard` (ISO/IEC 9899:2018), nothing else.
 Everything else follows from the layout rule (`<prefix>` is the product's
 `symbol_prefix`, `<PREFIX>` its `environment_prefix`):
 
@@ -55,6 +56,7 @@ import os
 import re
 import subprocess
 
+from . import c_standard
 from . import config as _config
 from . import path_guard as _guard
 from . import process
@@ -65,8 +67,6 @@ RUN_ID_PATTERN = process.RUN_ID_PATTERN
 DEPS_FOLDER = process.DEPS_FOLDER
 # One lowercase word: a Cell name and each segment of a Cell path.
 NAME_PATTERN = re.compile(r"[a-z][a-z0-9]{0,31}")
-# The one ISO C edition of every Cell (owner rule 2026-11-02: all native code is C23).
-STANDARD_PATTERN = re.compile(r"c23")
 EDITION_PATTERN = re.compile(r"20[0-9]{2}")
 
 CELL_KEYS = {"path", "standard", "definitions", "include_roots", "depends_on", "freestanding", "targets"}
@@ -160,8 +160,7 @@ class Cell:
                  "Cell %s: path %r must be %s or <category>/%s, one lowercase word per segment"
                  % (name, self.path, name, name))
         self.standard = entry["standard"]
-        _require(isinstance(self.standard, str) and STANDARD_PATTERN.fullmatch(self.standard) is not None,
-                 "Cell %s: standard %r is not c23 (every Cell is C23)" % (name, self.standard))
+        _require(self.standard == c_standard.C_STANDARD, c_standard.token_refusal("Cell %s" % name, self.standard))
         self.definitions = entry["definitions"]
         _require(isinstance(self.definitions, dict)
                  and all(isinstance(k, str) and isinstance(v, str) for k, v in self.definitions.items()),

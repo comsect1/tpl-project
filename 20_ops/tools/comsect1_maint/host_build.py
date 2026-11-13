@@ -8,8 +8,9 @@ symbol set equals the functions declared in the Cell's public membrane header
 is checked by the C compiler with a compile-only `_Static_assert` probe. No
 executable is ever produced. All output goes to `90_temps/build/<cell>/<run-id>/`.
 The Cell list, standard, definitions, include roots and dependencies come from
-the registry; the compiler folder, the fnd-sdk-standard pin, the image target,
-the Provider family rule, SDK link libraries and export aliases from
+the registry (the standard is the one of `c_standard`, ISO/IEC 9899:2018);
+the compiler folder, the fnd-sdk-standard pin, the image target, the
+Provider family rule, SDK link libraries and export aliases from
 `maint_config.json` `host_build`; product logic that is not data from the
 hooks of `product_hooks.py`.
 
@@ -37,6 +38,11 @@ Every object of the library is listed with `nm`, and two units that define the
 same external-linkage symbol fail the build (registry.require_unique_symbols).
 A gcc command line longer than Windows accepts is passed through a response
 file, recorded under `gcc_response_files`.
+
+The standard is verified by value, not by option name: once per distinct
+compiler and unit flag set of the run, a one-line probe is preprocessed and the
+build fails closed unless `__STDC_VERSION__` expands to the value of the
+standard; the build record keeps every probe under `c_standard`.
 
     python -I -B 20_ops/tools/build.py (--cell <name> ... | --all) [--run-id ID] [--run-tests]
                                       [--sanitize address|undefined] [--accept-tool-drift]
@@ -84,6 +90,7 @@ import re
 import subprocess
 import sys
 
+from . import c_standard
 from . import config as maint_config
 from . import object_cache
 from . import process
@@ -124,8 +131,6 @@ UBSAN_FLAGS = ["-fsanitize=undefined,float-cast-overflow", "-fsanitize-trap=all"
 MSVC_ROOTS = [r"C:\Program Files\Microsoft Visual Studio", r"C:\Program Files (x86)\Microsoft Visual Studio"]
 ASAN_RUNTIME = "clang_rt.asan_dynamic-x86_64.dll"
 MSVC_WARNING_FLAGS = ["/W4", "/WX"]
-# The cl spelling of a registry standard: cl has no /std:c23 and selects C23 as /std:clatest.
-MSVC_STANDARD_FLAGS = {"c23": "/std:clatest"}
 # Symbols MSVC emits as external COMDAT in every unit that uses them (string literals, float constants,
 # ASan bookkeeping); they are merged by the linker and are not definitions of a Cell.
 MSVC_COMPILER_SYMBOL = re.compile(r"^(\?\?_C@|__real@|__xmm@|__ymm@|__asan|__odr_asan|_volmd$|\.)")
@@ -270,20 +275,13 @@ def msvc_environment(tmp_dir):
     return env, paths
 
 
-def msvc_standard_flag(unit_cell):
-    """The cl flag of the Cell's standard (MSVC_STANDARD_FLAGS); a standard cl cannot select is refused."""
-    if unit_cell.standard not in MSVC_STANDARD_FLAGS:
-        raise BuildError("Cell %s: cl has no flag for standard %s" % (unit_cell.name, unit_cell.standard))
-    return MSVC_STANDARD_FLAGS[unit_cell.standard]
-
-
 def _msvc_unit_command(paths, unit_cell, includes, extra):
-    """cl flags of one unit: the Cell's standard, the warnings as errors, its definitions.
+    """cl flags of one unit: the standard (c_standard.MSVC_FLAG), the warnings as errors, its definitions.
     `includes` is the gcc form ("-I", root, ...), joined to one argument per root."""
     joined = ["/I" + root for flag, root in zip(includes[0::2], includes[1::2]) if flag == "-I"]
     if len(joined) * 2 != len(includes):
         raise BuildError("unexpected include arguments for cl: %s" % includes)
-    return ([paths["cl"], "/nologo", msvc_standard_flag(unit_cell), "/TC"] + MSVC_WARNING_FLAGS
+    return ([paths["cl"], "/nologo", c_standard.MSVC_FLAG, "/TC"] + MSVC_WARNING_FLAGS
             + unit_cell.definition_flags() + joined + extra)
 
 
@@ -442,6 +440,31 @@ def _export_table(objdump_text, dll_path):
 
 def _unit_flags(unit_cell):
     return [GCC_PATH, "-std=%s" % unit_cell.standard] + WARNING_FLAGS + unit_cell.definition_flags()
+
+
+def _verify_standard(unit_cells, env, run_dir, msvc_paths=None, msvc_env=None):
+    """Verify the standard of every distinct compiler and unit flag set of the run by value: preprocess the
+    one-line probe and refuse unless __STDC_VERSION__ expands to the standard's value. Returns the
+    `c_standard` member of the build record (c_standard.run_record)."""
+    probe_path = os.path.join(run_dir, "tmp", c_standard.PROBE_FILE_NAME)
+    with open(probe_path, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(c_standard.PROBE_SOURCE)
+    probes = {}
+    for unit_cell in unit_cells:
+        commands = [(_unit_flags(unit_cell) + c_standard.PREPROCESS_FLAGS + [probe_path], env)]
+        if msvc_paths is not None:
+            commands.append((_msvc_unit_command(msvc_paths, unit_cell, [],
+                                                c_standard.MSVC_PREPROCESS_FLAGS + [probe_path]), msvc_env))
+        for command, command_env in commands:
+            if tuple(command) in probes:
+                continue
+            out = _run(command, command_env, run_dir, "C standard probe of %s" % unit_cell.name).stdout
+            record = c_standard.verification(command, out)
+            if not record["verified"]:
+                raise BuildError(c_standard.mismatch("Cell %s" % unit_cell.name, record),
+                                 {"c_standard": c_standard.run_record([record])})
+            probes[tuple(command)] = record
+    return c_standard.run_record(list(probes.values()))
 
 
 def _unit_includes(unit_cell):
@@ -864,6 +887,11 @@ def _build_in_run(cell, linked, run_id, run_dir, sanitize, cache, cache_before, 
         msvc_env, msvc_paths = msvc_environment(tmp_dir)
     sanitize_gcc = UBSAN_FLAGS if sanitize == "undefined" else []
     msvc_unit_flags = ["/O2", "/Z7", "/MD", "/fsanitize=address"]
+    standard_cells = []
+    for unit_cell in linked + [cell] + probed:
+        if unit_cell not in standard_cells:
+            standard_cells.append(unit_cell)
+    standard_record = _verify_standard(standard_cells, env, run_dir, msvc_paths, msvc_env)
 
     # ABI probes: compile only (-fsyntax-only), so no object or executable exists. One probe per
     # probed Cell, built with that Cell's own flags and include roots; the probes run in parallel.
@@ -1039,11 +1067,12 @@ def _build_in_run(cell, linked, run_id, run_dir, sanitize, cache, cache_before, 
         "depends_on": [dependency.name for dependency in cell.dependency_closure()],
         "linked": [linked_cell.name for linked_cell in linked],
         "exports": [exported_cell.name for exported_cell in cell.exported_cells()],
-        "flags": ([msvc_standard_flag(cell), "/TC"] + MSVC_WARNING_FLAGS + definitions + msvc_unit_flags
+        "flags": ([c_standard.MSVC_FLAG, "/TC"] + MSVC_WARNING_FLAGS + definitions + msvc_unit_flags
                   if msvc_paths is not None else [standard_flag] + WARNING_FLAGS + definitions + OPTIMIZE_FLAGS + sanitize_gcc),
         "library_sha256": digest,
         "exported": sorted(exported),
         "abi_probe": "passed",
+        "c_standard": standard_record,
         "unique_external_symbols": symbol_count,
         "struct_layout": abis[cell.name].struct_layout(),
         "constants": abis[cell.name].CONSTANTS,
