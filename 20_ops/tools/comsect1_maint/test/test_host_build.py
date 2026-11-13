@@ -43,6 +43,18 @@ class HostBuildTest(unittest.TestCase):
         self.assertEqual(build.header_functions(self.cells["engine"]), ["wsb_engine_open", "wsb_engine_name"])
         self.assertEqual(build._strip_comments("a /* b */ c // d\ne"), "a  c \ne")
 
+    def test_header_functions_follow_a_declared_function_prefix(self):
+        root = self.work.folder("declared_prefix")
+        support.c_cell(root, "engine", "wsb")
+        support.write(root / "10_pkg" / "c" / "engine" / "membrane" / "xpt_wsb_engine.h",
+                      "int horizon_gate_open(void);\nconst char *horizon_sender_name(int index);\n"
+                      "int wsb_engine_open(void);\n")
+        entry = support.c_entry("engine", function_prefix="horizon_")
+        cell = registry.load_registry(support.product(root, "wsb", {"engine": entry}, cores={}))["cells"]["engine"]
+        self.assertEqual(build.header_functions(cell), ["horizon_gate_open", "horizon_sender_name"])
+        self.assertEqual(build.definition_text(cell, [], build.header_functions(cell), []),
+                         "LIBRARY wsb_engine.dll\nEXPORTS\n    horizon_gate_open\n    horizon_sender_name\n")
+
     def test_export_table(self):
         self.assertEqual(build._export_table(OBJDUMP, "x.dll"), ["dcb_engine_open", "dcb_engine_close"])
         with self.assertRaisesRegex(build.BuildError, "no export table"):

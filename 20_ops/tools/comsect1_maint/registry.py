@@ -12,6 +12,9 @@ Everything else follows from the layout rule (`<prefix>` is the product's
     Cell root        10_pkg/c/<path>        (<path> is <name>, or <category>/<name>)
     Python tests     10_pkg/test/c/<path>   (<prefix>_<name>_abi.py, test_<prefix>_<name>_*.py)
     public header    the one membrane/xpt_*.h (product suffix exclusions apply)
+    public functions <prefix>_<name>_* of the public header, or <function_prefix>* when the
+                     Cell declares `function_prefix` (public names that are an external
+                     compatibility surface and carry no product prefix)
     sources          every .c below the Cell root
     contract headers every contract/*.h
     library          <prefix>_<name>.dll, found through <PREFIX>_<NAME>_LIBRARY
@@ -68,12 +71,14 @@ DEPS_FOLDER = process.DEPS_FOLDER
 # One lowercase word: a Cell name and each segment of a Cell path.
 NAME_PATTERN = re.compile(r"[a-z][a-z0-9]{0,31}")
 EDITION_PATTERN = re.compile(r"20[0-9]{2}")
+# function_prefix of a Cell: lowercase words joined and ended by an underscore (horizon_, gate_port_).
+FUNCTION_PREFIX_PATTERN = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*_")
 
 CELL_KEYS = {"path", "standard", "definitions", "include_roots", "depends_on", "freestanding", "targets"}
 # Optional keys of a Cell (see Cell below); sdk_dependencies only when the product configures them.
 OPTIONAL_CELL_KEYS = {"library_from", "link_with", "link_libraries", "exports", "hosted_include_roots",
                       "test_fixture", "fixture_units", "link_fixture", "external_headers", "budget",
-                      "passive_include_roots"}
+                      "passive_include_roots", "function_prefix"}
 RUST_CELL_KEYS = {"path", "edition", "depends_on"}
 # The category folder of the Provider Cells (provider/<name>).
 PROVIDER_CATEGORY = "provider"
@@ -252,7 +257,16 @@ class Cell:
         self.definition_file = "%s.def" % self.stem
         self.archive_name = "lib%s.a" % self.stem
         self.library_environment = "%s_LIBRARY" % self.stem.upper()
-        self.function_prefix = self.stem + "_"
+        # The prefix of every function the public header declares and the library exports: the stem,
+        # unless the Cell declares the prefix of its public names (function_prefix).
+        self.function_prefix = entry.get("function_prefix", self.stem + "_")
+        _require(isinstance(self.function_prefix, str)
+                 and FUNCTION_PREFIX_PATTERN.fullmatch(self.function_prefix) is not None,
+                 "Cell %s: function_prefix %r must be lowercase words joined and ended by an underscore"
+                 % (name, self.function_prefix))
+        _require(not self.provider or "function_prefix" not in entry,
+                 "Cell %s: a Provider Cell keeps every public symbol in %s_ and declares no function_prefix"
+                 % (name, self.stem))
         self.build_root = os.path.join(repo, "90_temps", "build", name)
         self.budget = entry.get("budget")
         if self.provider:

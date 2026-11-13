@@ -45,6 +45,24 @@ class RegistryTest(unittest.TestCase):
         self.assertEqual(cells["engine"].library_name, "dcb_engine.dll")
         self.assertEqual(registry.get_cell("engine", settings).public_header, "membrane/xpt_dcb_engine.h")
 
+    def test_function_prefix_defaults_to_the_stem_and_may_be_declared(self):
+        root, settings = self.c_product("function_prefix", extra_cells={})
+        cells = registry.load_registry(settings)["cells"]
+        self.assertEqual((cells["engine"].function_prefix, cells["serial"].function_prefix),
+                         ("dcb_engine_", "dcb_provider_serial_"))
+        entries = json.loads((root / "20_ops" / "tools" / "cells.json").read_text(encoding="utf-8"))["cells"]
+        declared = dict(entries, engine=dict(entries["engine"], function_prefix="horizon_"))
+        engine = registry.load_registry(support.product(root, "dcb", declared))["cells"]["engine"]
+        self.assertEqual((engine.function_prefix, engine.stem, engine.library_name),
+                         ("horizon_", "dcb_engine", "dcb_engine.dll"))
+        for value in ("horizon", "Horizon_", "_horizon_", "horizon__gate_", "", 7):
+            bad = dict(entries, engine=dict(entries["engine"], function_prefix=value))
+            with self.subTest(value=value), self.assertRaisesRegex(registry.RegistryError, "function_prefix"):
+                registry.load_registry(support.product(root, "dcb", bad))
+        bad = dict(entries, serial=dict(entries["serial"], function_prefix="serial_"))
+        with self.assertRaisesRegex(registry.RegistryError, "declares no function_prefix"):
+            registry.load_registry(support.product(root, "dcb", bad))
+
     def test_target_names(self):
         _root, settings = self.c_product("targets_arm")
         self.assertEqual(sorted(registry.load_registry(settings)["cells"]["engine"].targets), ["arm", "windows"])

@@ -4,8 +4,9 @@
 
 Python standard library only. The library is a product artifact: the exported
 symbol set equals the functions declared in the Cell's public membrane header
-(`membrane/xpt_*.h`). The ABI mirror `10_pkg/test/c/<path>/<prefix>_<cell>_abi.py`
-is checked by the C compiler with a compile-only `_Static_assert` probe. No
+(`membrane/xpt_*.h`): the functions named `<prefix>_<cell>_*`, or, for a Cell
+that declares `function_prefix` in the registry, those named with that prefix.
+The ABI mirror `10_pkg/test/c/<path>/<prefix>_<cell>_abi.py` is checked by the C compiler with a compile-only `_Static_assert` probe. No
 executable is ever produced. All output goes to `90_temps/build/<cell>/<run-id>/`.
 The Cell list, standard, definitions, include roots and dependencies come from
 the registry (the standard is the one of `c_standard`, ISO/IEC 9899:2018);
