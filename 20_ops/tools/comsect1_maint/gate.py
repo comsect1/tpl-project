@@ -12,6 +12,14 @@ when the product defines the `gate_publications` hook, its publications. The
 derived configuration lives in a task-owned scratch run that is moved through
 `99_trash` afterwards (exact run, inventory and identity checked).
 
+A dependency Cell (registry key `dependency`) is not judged here: `--cell` on
+it is refused, its Gate verdict being its owner's. The membrane of a dependency
+Cell is an external include root of the Cells that depend on it, like the
+membrane of any dependency: a repository-relative folder below `10_pkg/deps/`,
+whose files enter the header closure as external inputs. With publications, the
+lane names the dependency Cell as the source Cell of such an input by its own
+`comsect1.json`, read where it is.
+
     python -I -B 20_ops/tools/gate.py --cell <name> --target <target> [--run-id ID]
                                       [--lane native|plain|both] [--accept-tool-drift]
 
@@ -94,6 +102,11 @@ def main(argv):
         if BASE_CONFIG is None:
             raise registry.RegistryError("maint_config.json configures no native Gate")
         cell = registry.get_cell(args.cell)
+        if cell.dependency is not None:
+            raise registry.RegistryError(
+                "Cell %s is a Cell of the dependency %s: its Gate verdict is its owner's and is given in its own "
+                "repository. This repository's Gate judges the Cells that depend on it, which read its membrane as "
+                "an external include root" % (cell.name, cell.dependency))
         if args.target not in cell.targets:
             raise registry.RegistryError("Cell %s does not support target %s" % (cell.name, args.target))
         run_id = args.run_id or new_run_id(cell.name, args.target)

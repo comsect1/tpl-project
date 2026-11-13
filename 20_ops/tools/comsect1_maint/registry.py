@@ -41,6 +41,34 @@ and never refuse on a mismatch or a dirty tree. The object cache keys every
 compile by the bytes of the headers actually read, so correctness never rests
 on the pin.
 
+A dependency Cell is a Cell of a declared dependency that this product compiles
+into its own libraries and archives from where it is: an entry with the key
+`dependency`, the path of the Git submodule that `.gitmodules` declares below
+`10_pkg/deps/`. Nothing is copied and nothing is written below the checkout.
+
+    Cell root        <dependency>/10_pkg/c/<path>
+    identity         the one `public_identity_surfaces` entry of the Cell's own `comsect1.json`:
+                     `identity` is the stem, `path` the public header (membrane/xpt_*.h)
+    public functions <identity>_* of that header, or <function_prefix>* when the entry declares it
+    sources          every .c below the Cell root
+    archive          lib<identity>.a (the dependency's own name, without the product prefix)
+    library, tests   none: its objects are linked into the libraries of the Cells that depend on
+                     it; its tests, ABI mirror and Gate verdict belong to its own repository
+
+The entry holds the keys every Cell holds (the consumer's flags: `standard`,
+`definitions`, `include_roots`, `freestanding`, `targets`) and may hold
+`function_prefix` and `budget`; every other optional key is refused. The
+manifest of the dependency Cell must name the language `c`; a Cell manifest
+carries no edition of the standard, so the entry carries the one token of
+`c_standard` like every Cell and the edition is verified by value under the
+consumer's flags. A dependency Cell depends only on dependency Cells and is no
+Provider. The registry and the configuration of the dependency's own repository
+are never read. The checkout is resolved at the declared submodule path only
+(no override variable); its HEAD, dirty state and the commit of the pin under
+`10_pkg/components/` that names the same `deps_path` are recorded
+(`Cell.dependency_record`), never a condition. `Cell.dependency_deliverables`
+names what a product ships of it under the dependency's own names.
+
 Every Cell name and path segment is one lowercase word. Across the Cells no two
 C file stems may be equal (a stem lives in one folder of one Cell; the only
 exception is a header-only stem whose copies carry one include guard), and no
@@ -79,6 +107,27 @@ CELL_KEYS = {"path", "standard", "definitions", "include_roots", "depends_on", "
 OPTIONAL_CELL_KEYS = {"library_from", "link_with", "link_libraries", "exports", "hosted_include_roots",
                       "test_fixture", "fixture_units", "link_fixture", "external_headers", "budget",
                       "passive_include_roots", "function_prefix"}
+# dependency of a dependency Cell: the path of the declared submodule that holds the Cell. Its entry
+# declares none of the keys below: tests, fixtures, bindings, exports of its own library and adopted
+# vocabulary belong to the dependency's own repository.
+DEPENDENCY_KEY = "dependency"
+DEPENDENCY_REFUSED_KEYS = {"library_from", "link_with", "link_libraries", "exports", "hosted_include_roots",
+                           "test_fixture", "fixture_units", "link_fixture", "external_headers",
+                           "passive_include_roots", "sdk_dependencies"}
+# The folder of the C Cells below a repository root, of this repository and of a dependency alike.
+CELL_FOLDER = ("10_pkg", "c")
+# The manifest of a dependency Cell: the language it must name, its public identity (lowercase words
+# joined by an underscore) and its public header, a membrane/xpt_*.h path relative to the Cell root.
+MANIFEST_FILE = "comsect1.json"
+C_LANGUAGE = "c"
+IDENTITY_PATTERN = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*")
+PUBLIC_HEADER_PATTERN = re.compile(r"membrane/xpt_[a-z0-9_]+\.h")
+# The licence text and the notices at the root of a dependency checkout (the names every repository of
+# the template carries); the licence is required of a shipped dependency, the notices ship when present.
+LICENSE_FILE = "LICENSE.md"
+NOTICE_FILE = "NOTICE.md"
+# The folder of the pin files; a pin describes the dependency whose submodule path its deps_path names.
+COMPONENTS_FOLDER = ("10_pkg", "components")
 RUST_CELL_KEYS = {"path", "edition", "depends_on"}
 # The category folder of the Provider Cells (provider/<name>).
 PROVIDER_CATEGORY = "provider"
@@ -152,12 +201,20 @@ class Cell:
         policy = settings.registry
         prefix = settings.symbol_prefix
         target_names = tuple(policy["target_names"])
-        optional = OPTIONAL_CELL_KEYS | ({"sdk_dependencies"} if policy["sdk_dependencies"] is not None else set())
+        optional = OPTIONAL_CELL_KEYS | {DEPENDENCY_KEY} \
+            | ({"sdk_dependencies"} if policy["sdk_dependencies"] is not None else set())
         _require(NAME_PATTERN.fullmatch(name) is not None, "Cell name %r is not one lowercase word" % name)
         _require(isinstance(entry, dict) and CELL_KEYS <= set(entry) <= CELL_KEYS | optional,
                  "Cell %s must hold %s and may hold %s, found %s"
                  % (name, sorted(CELL_KEYS), sorted(optional), sorted(entry) if isinstance(entry, dict) else entry))
         self.name = name
+        # A dependency Cell (DEPENDENCY_KEY): the declared submodule path that holds it, else None.
+        self.dependency = entry.get(DEPENDENCY_KEY)
+        if DEPENDENCY_KEY in entry:
+            refused = sorted(DEPENDENCY_REFUSED_KEYS & set(entry))
+            _require(not refused, "Cell %s: a dependency Cell declares no %s: its tests, fixtures, bindings and "
+                     "adopted vocabulary belong to its own repository (%s %r)"
+                     % (name, ", ".join(refused), DEPENDENCY_KEY, self.dependency))
         self.path = entry["path"]
         segments = self.path.split("/") if isinstance(self.path, str) else []
         _require(segments and all(NAME_PATTERN.fullmatch(s) is not None for s in segments)
@@ -245,18 +302,37 @@ class Cell:
             _require(self.freestanding, "Cell %s: cross-build needs freestanding true" % name)
 
         repo = settings.repo_root
-        self.root = os.path.join(repo, "10_pkg", "c", *segments)
-        self.tests_root = os.path.join(repo, "10_pkg", "test", "c", *segments)
         # A Provider (provider/<name>) keeps every public symbol in <prefix>_provider_<name>_.
         self.provider = name if len(segments) == 2 and segments[0] == PROVIDER_CATEGORY else None
-        self.stem = "%s_provider_%s" % (prefix, name) if self.provider else "%s_%s" % (prefix, name)
+        if self.dependency is None:
+            self.dependency_checkout = None
+            self.root = os.path.join(repo, *CELL_FOLDER, *segments)
+            self.tests_root = os.path.join(repo, "10_pkg", "test", "c", *segments)
+            self.stem = "%s_provider_%s" % (prefix, name) if self.provider else "%s_%s" % (prefix, name)
+            self.abi_path = os.path.join(self.tests_root, "%s_abi.py" % self.stem)
+            self.test_pattern = "test_%s_*.py" % self.stem
+            self.library_name = "%s.dll" % self.stem
+            self.definition_file = "%s.def" % self.stem
+            self.library_environment = "%s_LIBRARY" % self.stem.upper()
+            published_header = None
+        else:
+            # The Cell of a dependency, read where it is: the declared submodule folder (its real path,
+            # checked, is dependency_checkout), the identity and the public header its own manifest
+            # publishes. It has no library, ABI mirror, test or library variable in this repository.
+            _require(not self.provider, "Cell %s: a dependency Cell is no Provider: a Provider is a Cell of the "
+                     "product whose family it serves (path %r)" % (name, self.path))
+            self.dependency_checkout = dependency_checkout(self.dependency, settings, name)
+            self.root = os.path.join(settings.path_of(self.dependency), *CELL_FOLDER, *segments)
+            manifest_path = os.path.join(self.root, MANIFEST_FILE)
+            _require(os.path.isfile(manifest_path),
+                     "Cell %s: %s has no %s: the dependency %s declares no Cell at %s. Next step: correct the path to "
+                     "a Cell of the dependency, or select a commit of the dependency that holds it."
+                     % (name, self.root, MANIFEST_FILE, self.dependency, "/".join(CELL_FOLDER + tuple(segments))))
+            self.stem, published_header = _dependency_publication(manifest_path, name)
+            self.tests_root = self.abi_path = self.test_pattern = None
+            self.library_name = self.definition_file = self.library_environment = None
         self.registration = self.stem + "_registration" if self.provider else None
-        self.abi_path = os.path.join(self.tests_root, "%s_abi.py" % self.stem)
-        self.test_pattern = "test_%s_*.py" % self.stem
-        self.library_name = "%s.dll" % self.stem
-        self.definition_file = "%s.def" % self.stem
         self.archive_name = "lib%s.a" % self.stem
-        self.library_environment = "%s_LIBRARY" % self.stem.upper()
         # The prefix of every function the public header declares and the library exports: the stem,
         # unless the Cell declares the prefix of its public names (function_prefix).
         self.function_prefix = entry.get("function_prefix", self.stem + "_")
@@ -289,15 +365,24 @@ class Cell:
                 _keys(limits, BUDGET_KEYS, "Cell %s budget %s" % (name, core))
                 _require(all(isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in limits.values()),
                          "Cell %s budget %s: sizes must be non-negative integers" % (name, core))
-        _require(os.path.isfile(os.path.join(self.root, "comsect1.json")),
-                 "Cell %s: %s has no comsect1.json" % (name, self.root))
+        _require(os.path.isfile(os.path.join(self.root, MANIFEST_FILE)),
+                 "Cell %s: %s has no %s" % (name, self.root, MANIFEST_FILE))
         # A Cell that declares the fnd-sdk-standard as a hosted vocabulary includes comsect1_provider.h
         # of the pinned checkout (standard_roots).
-        self.adopts_standard = _declares_standard(os.path.join(self.root, "comsect1.json"))
+        self.adopts_standard = _declares_standard(os.path.join(self.root, MANIFEST_FILE))
         self.sources = self._sources()
-        self.public_header = self._public_header(allow_none=self.export_names is not None
-                                                or self.library_from is not None)
-        self.contract_headers = self._contract_headers()
+        if self.dependency is None:
+            self.public_header = self._public_header(allow_none=self.export_names is not None
+                                                    or self.library_from is not None)
+            self.contract_headers = self._contract_headers()
+        else:
+            # The owner's layout is not judged here: the published header must exist, nothing more.
+            self.public_header = published_header
+            _require(os.path.isfile(os.path.join(self.root, *published_header.split("/"))),
+                     "Cell %s: the public header %s is missing below %s, although %s of the dependency publishes it. "
+                     "Next step: select a commit of the dependency %s that holds it."
+                     % (name, published_header, self.root, MANIFEST_FILE, self.dependency))
+            self.contract_headers = self._contract_headers(required=False)
         self.fixture_root = None
         self.fixture_sources = []
         self.fixture_library_name = None
@@ -538,11 +623,55 @@ class Cell:
                     found.append((self.name, os.path.relpath(path, self.root).replace("\\", "/"), guard))
         return found
 
-    def _contract_headers(self):
+    def _contract_headers(self, required=True):
         contract = os.path.join(self.root, "contract")
         found = sorted(n for n in os.listdir(contract) if n.endswith(".h")) if os.path.isdir(contract) else []
-        _require(found, "Cell %s: contract holds no header" % self.name)
+        _require(found or not required, "Cell %s: contract holds no header" % self.name)
         return ["contract/" + n for n in found]
+
+    def dependency_record(self):
+        """The recorded identity of a dependency Cell's checkout (None for a Cell of this repository):
+        the Cell and its published identity, the declared submodule path, the checkout and Cell roots,
+        the pin file under 10_pkg/components/ that names the same deps_path with its commit (None
+        without exactly one such pin), the observed HEAD, dirty state and note, and whether HEAD
+        equals the pin. Metadata only: a mismatch or a dirty tree is never refused."""
+        if self.dependency is None:
+            return None
+        observed = observed_checkout(self.dependency_checkout)
+        pin_path, pinned = _dependency_pin(self.settings, self.dependency)
+        return {"cell": self.name, "identity": self.stem, DEPS_PATH_KEY: self.dependency, "source": SOURCE_DECLARED,
+                "root": self.dependency_checkout, "cell_root": self.root, "pin": pin_path, "pinned_commit": pinned,
+                "head": observed["head"], "dirty": observed["dirty"], "note": observed["note"],
+                "matches_pin": observed["head"] is not None and observed["head"] == pinned}
+
+    def dependency_deliverables(self):
+        """What a product ships of a dependency Cell under the dependency's own names (None for a Cell
+        of this repository), for the product's packaging code:
+
+            identity        the published identity; deps_path, checkout and cell_root locate the Cell
+            public_headers  the public header and the contract headers, relative to cell_root; a
+                            package keeps these relative paths (the public header includes its
+                            contract by a relative path)
+            archive_name    lib<identity>.a; archives maps each cross core to the archive below the
+                            run directory of `cross_build.py --archive`
+            license_files   the licence text of the checkout root (required) and its notices (when
+                            present), absolute
+
+        Read only: nothing is written below the checkout."""
+        if self.dependency is None:
+            return None
+        checkout = self.settings.path_of(self.dependency)
+        licence = os.path.join(checkout, LICENSE_FILE)
+        _require(os.path.isfile(licence),
+                 "Cell %s: the dependency checkout %s holds no %s: a product cannot ship the dependency without its "
+                 "licence text. Next step: select a commit of the dependency %s that holds %s at its root."
+                 % (self.name, checkout, LICENSE_FILE, self.dependency, LICENSE_FILE))
+        notices = os.path.join(checkout, NOTICE_FILE)
+        return {"identity": self.stem, DEPS_PATH_KEY: self.dependency, "checkout": checkout, "cell_root": self.root,
+                "public_headers": [self.public_header] + self.contract_headers,
+                "archive_name": self.archive_name,
+                "archives": {core: "%s/%s/%s" % (self.name, core, self.archive_name) for core in self.cross_cores()},
+                "license_files": [licence] + ([notices] if os.path.isfile(notices) else [])}
 
 
 class RustCell:
@@ -620,6 +749,31 @@ def _declares_standard(manifest_path):
     return any(isinstance(entry, dict) and entry.get("id") == "fnd-sdk-standard" for entry in vocabularies)
 
 
+def _dependency_publication(manifest_path, name):
+    """(identity, public header) that the manifest of a dependency Cell publishes: it must name the
+    language c and exactly one public identity surface. The owner declares both; the consumer's
+    registry restates neither."""
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as handle:
+            manifest = json.load(handle)
+    except (OSError, ValueError) as error:
+        raise RegistryError("unreadable Cell manifest %s: %s" % (manifest_path, error))
+    languages = manifest.get("languages") if isinstance(manifest, dict) else None
+    _require(isinstance(languages, list) and C_LANGUAGE in languages,
+             "Cell %s: the manifest %s of the dependency Cell does not declare the language %s (languages %r): only "
+             "a C Cell is compiled into this product" % (name, manifest_path, C_LANGUAGE, languages))
+    surfaces = manifest.get("public_identity_surfaces")
+    surface = surfaces[0] if isinstance(surfaces, list) and len(surfaces) == 1 else None
+    _require(isinstance(surface, dict) and isinstance(surface.get("identity"), str)
+             and IDENTITY_PATTERN.fullmatch(surface["identity"]) is not None
+             and isinstance(surface.get("path"), str) and PUBLIC_HEADER_PATTERN.fullmatch(surface["path"]) is not None,
+             "Cell %s: the manifest %s of the dependency Cell must declare exactly one public identity surface "
+             "{identity: lowercase words joined by an underscore, path: membrane/xpt_<stem>.h}, found %r: the "
+             "identity names its archive and its public functions, the path is its public header"
+             % (name, manifest_path, surfaces))
+    return surface["identity"], surface["path"]
+
+
 def _git(checkout, arguments):
     try:
         done = subprocess.run(["git", "-C", checkout] + arguments, capture_output=True, text=True,
@@ -659,6 +813,56 @@ def dependency_checkout_root(path, repo_root, what, found, details):
             % (what, checkout, found, "/".join(DEPS_FOLDER), "/".join(DEPS_FOLDER), repo_root),
             dict(details, root=checkout))
     return checkout
+
+
+def dependency_checkout(deps_path, settings, name):
+    """The real path of the declared checkout that holds the dependency Cell `name`: `deps_path` is a
+    submodule path that the repository's .gitmodules lists below 10_pkg/deps/, the folder exists and
+    holds an entry, and no component of it is a link or reparse point (fail closed, each with its
+    reason and next step). The checkout's commit and dirty state are not conditions."""
+    what = "Cell %s: %s %r" % (name, DEPENDENCY_KEY, deps_path)
+    defect = _deps_path_defect(deps_path)
+    _require(defect is None, "%s is invalid: %s. Next step: name the submodule folder of the dependency below %s/."
+             % (what, defect, "/".join(DEPS_FOLDER)))
+    gitmodules = os.path.join(settings.repo_root, GITMODULES_FILE)
+    root = settings.path_of(deps_path)
+    details = {DEPS_PATH_KEY: deps_path, "source": SOURCE_DECLARED, "root": root, "gitmodules": gitmodules}
+    if deps_path not in _submodule_paths(settings.repo_root):
+        raise RegistryError(
+            "Cell %s: %s %s, but %s lists no submodule at that path: the submodule is the declaration and the "
+            "registry names its path. Next step: run %s, or correct %s to the declared submodule path."
+            % (name, DEPENDENCY_KEY, deps_path, gitmodules, SUBMODULE_ADD_STEP % (UNNAMED_REPOSITORY, deps_path),
+               DEPENDENCY_KEY), details)
+    try:
+        state = _folder_state(root)
+    except OSError as error:
+        raise RegistryError("Cell %s: the dependency checkout %s (%s %s) is not readable: %s. Next step: repair the "
+                            "folder, then run %s." % (name, root, DEPENDENCY_KEY, deps_path, error,
+                                                      SUBMODULE_INIT_STEP % deps_path), details)
+    if state is not None:
+        raise RegistryError("Cell %s: the dependency checkout %s (%s %s) is %s. Next step: run %s."
+                            % (name, root, DEPENDENCY_KEY, deps_path, state, SUBMODULE_INIT_STEP % deps_path), details)
+    return dependency_checkout_root(root, settings.repo_root, "Cell %s: the dependency checkout" % name,
+                                    "declared as %s %s" % (DEPENDENCY_KEY, deps_path), details)
+
+
+def _dependency_pin(settings, deps_path):
+    """(pin file, pinned commit) of the one pin under 10_pkg/components/ whose deps_path names the
+    submodule, or (None, None) without exactly one. Recorded metadata: an unreadable file is skipped."""
+    folder = os.path.join(settings.repo_root, *COMPONENTS_FOLDER)
+    found = []
+    for file_name in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
+        if not file_name.endswith(".json"):
+            continue
+        path = os.path.join(folder, file_name)
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                pin = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        if isinstance(pin, dict) and pin.get(DEPS_PATH_KEY) == deps_path:
+            found.append((path, pin["commit"] if isinstance(pin.get("commit"), str) else None))
+    return found[0] if len(found) == 1 else (None, None)
 
 
 def _git_observation(checkout, arguments):
@@ -1010,7 +1214,7 @@ def load_registry(settings=None):
              "registry cores must map core names to flag lists")
     _require(isinstance(raw["cells"], dict) and raw["cells"], "registry cells must be a non-empty object")
     cells = {name: Cell(name, entry, cores, settings) for name, entry in raw["cells"].items()}
-    paths = [cell.path for cell in cells.values()]
+    paths = [(cell.dependency, cell.path) for cell in cells.values()]
     _require(len(set(paths)) == len(paths), "registry cells must have distinct paths")
     require_unique_stems([entry for cell in cells.values() for entry in cell.stem_files()])
     for cell in cells.values():
@@ -1020,9 +1224,15 @@ def load_registry(settings=None):
             cell.link_with.append(cells[other])
         if cell.library_from is not None:
             _require(cell.library_from in cells, "Cell %s: library_from names unknown Cell %r" % (cell.name, cell.library_from))
+            _require(cells[cell.library_from].dependency is None,
+                     "Cell %s: library_from names the dependency Cell %s, which has no library in this repository"
+                     % (cell.name, cell.library_from))
     for cell in cells.values():
         for dependency in cell.depends_on:
             _require(dependency in cells, "Cell %s depends on unknown Cell %r" % (cell.name, dependency))
+            _require(cell.dependency is None or cells[dependency].dependency is not None,
+                     "Cell %s: a dependency Cell depends only on dependency Cells, not on %s, a Cell of this "
+                     "repository" % (cell.name, dependency))
             cell.dependencies.append(cells[dependency])
     for cell in cells.values():
         _require_acyclic(cell, [])
@@ -1049,6 +1259,13 @@ def load_registry(settings=None):
                 _require(dependency.freestanding, "Cell %s is freestanding but depends on hosted Cell %s"
                          % (cell.name, dependency.name))
     return {"cores": cores, "cells": cells}
+
+
+def authored_cells(cells):
+    """The Cells this repository authors, in name order: every Cell of the registry that is no
+    dependency Cell. They are the Cells its tools build a library for, test and submit to the Gate; a
+    dependency Cell is built only into them and is verified in its own repository."""
+    return [cell for _name, cell in sorted(cells.items()) if cell.dependency is None]
 
 
 def get_cell(name, settings=None):

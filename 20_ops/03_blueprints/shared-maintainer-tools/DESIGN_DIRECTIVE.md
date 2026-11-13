@@ -917,3 +917,43 @@ checkout inside the repository, so a product had to store a machine path.
 - Toolchain location settings (`host_build.compiler_bin_dir`,
   `toolchain_bin_dir`, `hosted_include_roots`, the reference toolchain) are
   outside this step; the policy names them as a known open non-conformance.
+
+## 18. A Cell of a dependency is built where it is (r6, 2026-11-13)
+
+A registry Cell root was always `10_pkg/c/<path>`, so a product could not
+compile a Cell that lives in a declared dependency submodule into its own
+libraries and archives without copying it. The common rules are
+`.instructions/consumed-dependencies.md` section 6.1.
+
+- Entry form: the ordinary Cell entry plus `dependency`, the submodule path.
+  A separate entry kind was not introduced: the build needs the same flags,
+  include roots, targets and `depends_on` edges, and one entry form keeps
+  `dependency_closure`, `linked_cells`, the stem check and the symbol check
+  unchanged.
+- Identity comes from the dependency Cell's own `comsect1.json` (the one
+  `public_identity_surfaces` entry), not from the consumer's entry and not
+  from the dependency's `cells.json` or `maint_config.json`: the stem is the
+  identity, so the archive is `lib<identity>.a` without the consumer's
+  product prefix.
+- Host model unchanged: a library links its own objects and the objects of
+  its dependency closure and exports its own public header. A dependency
+  Cell is such a linked Cell and never the Cell a library is built for, so no
+  library name, `.def` file, ABI mirror or test folder exists for it. A
+  library that lists it in `exports` derives the export names from its public
+  header into the `.def` file of the run directory.
+- C standard: the manifest must name the language `c`; it carries no edition,
+  so nothing of the dependency is compared with the consumer's token. The
+  edition is verified by value under the consumer's flags (the existing
+  probe), and the sources compile under those flags or the build fails.
+- Resolution: the declared submodule path only. No override variable: the
+  Gate takes the membrane as a repository-relative external include root, and
+  an override outside the repository cannot be one.
+- Refusals are structural (section 16 stays): invalid or undeclared path,
+  uninitialized checkout, link component, missing manifest, language,
+  publication or public header. The commit and the dirty state are recorded
+  with the pin under `10_pkg/components/` that names the same `deps_path`
+  (`Cell.dependency_record`: `dependency_cells` in `build_record.json`,
+  `dependency` per result in `summary.json`).
+- `gate.py` and `build.py` refuse the entry itself; `registry.authored_cells`
+  is the set of Cells the consumer builds a library for, tests and submits.
+- `Cell.dependency_deliverables` is the read-only packaging view.

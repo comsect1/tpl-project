@@ -29,6 +29,12 @@ once) must be unique (registry.require_unique_symbols) for the image without a
 platform Cell and for each platform's image. Any failure exits non-zero with a
 reason on stderr (fail closed).
 
+A dependency Cell (registry key `dependency`: a Cell of a declared submodule
+below `10_pkg/deps/`) is cross-built like every freestanding arm Cell, from the
+checkout and with this product's flags, into this run directory; its archive
+carries the dependency's own name (`lib<identity>.a`) and its result keeps the
+checkout under `dependency`. Nothing is written below the checkout.
+
 The standard (`c_standard`, ISO/IEC 9899:2018) is verified by value before any
 unit compiles: once per distinct core, Cell and common flag set, a one-line
 probe is preprocessed and the run fails closed unless `__STDC_VERSION__`
@@ -333,6 +339,9 @@ def _build_run(run_id, make_archive, tools, cores, cells, run_dir, tmp_dir, obje
                     for part, value in zip(("text", "data", "bss"), total) if value > limits[part]]
             if over:
                 raise CrossBuildError("Cell %s on %s exceeds its budget: %s" % (cell_name, core, ", ".join(over)))
+        if cell.dependency is not None:
+            # The checkout of a dependency Cell (metadata, never a condition).
+            record["results"][-1]["dependency"] = cell.dependency_record()
         if cell.external_headers is not None:
             external, configs = cell.external_roots(core)
             record["results"][-1]["external_headers"] = {

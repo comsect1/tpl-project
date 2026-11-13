@@ -21,6 +21,15 @@ roots; the consumer additionally sees the membrane of every dependency as an
 include root and nothing else of it. The exports are still the functions of the
 consumer's own public header only.
 
+A dependency Cell (registry key `dependency`: a Cell of a declared submodule
+below `10_pkg/deps/`) is linked the same way: its sources are compiled from the
+checkout with this product's flags into the library of every Cell that depends
+on it, and its membrane is their include root. It has no library, ABI mirror or
+test here (`--cell <dependency Cell>` is refused, `--all` skips it); a library
+that names it in `exports` exports the functions of its public header through
+the `.def` file of the run directory. Nothing is written below the checkout;
+the build record keeps its checkout under `dependency_cells`.
+
 A hosted Cell that binds the required operations of another Cell is the test
 library of that Cell (`library_from`); `exports` lists the Cells whose public
 header the library exports, `link_libraries` the system import libraries.
@@ -803,6 +812,10 @@ def build_library(cell_name, run_id, sanitize=None, accept_tool_drift=False, obj
     except maint_config.ConfigError as error:
         raise BuildError(str(error))
     requested = get_cell(cell_name)
+    if requested.dependency is not None:
+        raise BuildError("Cell %s is a Cell of the dependency %s: it has no library of its own in this repository. "
+                         "Its objects are linked into the library of every Cell that depends on it; its tests and "
+                         "its ABI belong to its own repository" % (requested.name, requested.dependency))
     cell, linked = requested.library_plan()
     if "windows" not in cell.targets:
         if "arm" in settings.registry["target_names"]:
@@ -818,9 +831,10 @@ def build_library(cell_name, run_id, sanitize=None, accept_tool_drift=False, obj
     if not RUN_ID_PATTERN.fullmatch(run_id):
         raise BuildError("run id %r does not match %s" % (run_id, RUN_ID_PATTERN.pattern))
     # Every Cell whose layout is probed: the exported ones, the built one and every Cell tested on it.
+    # An exported dependency Cell has no ABI mirror here: its layout is verified in its own repository.
     probed = []
     for probe_cell in cell.exported_cells() + cell.tested_cells():
-        if probe_cell not in probed:
+        if probe_cell not in probed and probe_cell.dependency is None:
             probed.append(probe_cell)
     for unit_cell in [cell] + linked:
         for name in unit_cell.sources + unit_cell.contract_headers:
@@ -1089,6 +1103,11 @@ def _build_in_run(cell, linked, run_id, run_dir, sanitize, cache, cache_before, 
     }
     if image_record is not None:
         record["image_record"] = image_record
+    # The dependency checkouts whose Cells this library links: declared path, pinned commit, observed
+    # HEAD and dirty state (metadata for debugging, never a condition of the build).
+    dependency_cells = [unit.dependency_record() for unit in linked if unit.dependency is not None]
+    if dependency_cells:
+        record["dependency_cells"] = dependency_cells
     # The Foundation checkout read by this build: root, pinned commit, observed HEAD and dirty state
     # (metadata for debugging, never a condition of the build).
     standard = registry.standard_record(_settings())
@@ -1113,9 +1132,10 @@ def _build_in_run(cell, linked, run_id, run_dir, sanitize, cache, cache_before, 
 
 
 def _requested_cells(args):
-    """The Cells named by --cell (in order, once each) or, with --all, every Cell with a windows target."""
+    """The Cells named by --cell (in order, once each) or, with --all, every Cell of this repository with a
+    windows target (a dependency Cell has no library of its own: registry.authored_cells)."""
     if args.all:
-        return [cell for _name, cell in sorted(registry.load_registry()["cells"].items()) if "windows" in cell.targets]
+        return [cell for cell in registry.authored_cells(registry.load_registry()["cells"]) if "windows" in cell.targets]
     names = []
     for name in args.cell:
         if name not in names:

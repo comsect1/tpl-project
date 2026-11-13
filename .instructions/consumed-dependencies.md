@@ -118,6 +118,48 @@ name or any other per-workstation rewrite never appears in `.gitmodules` or in
 any other tracked file. The maintainer tools read only the `path` of a `.gitmodules` entry and do
 not judge its `url`; this rule is enforced by review.
 
+### 6.1 Building a Cell of a dependency
+
+A consumer that compiles a Cell of a dependency into its own libraries and
+archives registers it as a dependency Cell: an entry of `cells.json` with the
+key `dependency`, the submodule path of the dependency.
+
+```json
+"<name>": {
+  "path": "<name>",
+  "dependency": "10_pkg/deps/<dependency>",
+  "standard": "c17",
+  "definitions": {},
+  "include_roots": ["membrane", "."],
+  "depends_on": [],
+  "freestanding": true,
+  "targets": {
+    "windows": {"gate": {"target": "x86_64-pc-windows-msvc", "plain_char": "signed"}},
+    "arm": {"gate": {"target": "thumbv7em-none-eabihf", "plain_char": "unsigned"},
+            "cross_cores": ["cortex-m4"]}
+  }
+}
+```
+
+The Cell root is `<dependency>/10_pkg/c/<path>`. Another Cell names the entry
+in `depends_on` like any Cell and includes the public header by its file name.
+
+| Subject | Rule |
+| --- | --- |
+| Declaration | `dependency` is a submodule path that `.gitmodules` lists below `10_pkg/deps/`. The checkout is resolved at that path only; no variable overrides it. |
+| Refused, each with its reason and next step | a `dependency` that is no valid path below `10_pkg/deps/`; a path `.gitmodules` does not list; a missing, empty or non-folder checkout (an uninitialized submodule: `git submodule update --init <path>`); a link or reparse component; no `comsect1.json` at the Cell root; a manifest that does not name the language `c` or does not declare exactly one public identity surface; a published header that is missing. |
+| Not refused | the commit of the checkout and a dirty tree (section 1). The build record (`dependency_cells`) and the cross-build result (`dependency`) keep the checkout root, the pin under `10_pkg/components/` whose `deps_path` names the submodule with its commit, the observed HEAD, the dirty state and `matches_pin`. |
+| Identity | read from the Cell's own `comsect1.json`: the one `public_identity_surfaces` entry gives the identity (`identity`) and the public header (`path`, `membrane/xpt_*.h`). The consumer restates neither and never edits the checkout. The registry and the tool configuration of the dependency's repository are not read. |
+| Names | the archive is `lib<identity>.a`, without the consumer's product prefix. The public functions are `<identity>_*`, or `<function_prefix>*` when the entry declares `function_prefix`. |
+| Entry keys | the keys every Cell holds, which are the consumer's flags, and optionally `function_prefix` and `budget`. `library_from`, `link_with`, `link_libraries`, `exports`, `hosted_include_roots`, `test_fixture`, `fixture_units`, `link_fixture`, `external_headers`, `passive_include_roots` and `sdk_dependencies` are refused. A dependency Cell is no Provider and depends only on dependency Cells. |
+| C standard | one standard for every Cell. A Cell manifest carries no edition, so the entry carries the token of `c_standard` and the edition is verified by the value of `__STDC_VERSION__` under the consumer's flags; the dependency's sources then compile under those flags and the consumer's warning bar, or the build fails. |
+| Host build | the sources are compiled from the checkout with the consumer's flags and linked into the library of every Cell that depends on the entry; its membrane is their include root. The entry has no library of its own: `build.py --cell <entry>` is refused and `--all` skips it. A library that lists the entry in `exports` exports the functions of its public header through the `.def` file of the run directory. |
+| Cross build | the entry is cross-built for its `cross_cores` like every freestanding arm Cell; `--archive` writes `<run>/<name>/<core>/lib<identity>.a`. The archive of a Cell that depends on it also holds its objects, as for every dependency. |
+| Tests | none in the consumer: no test folder and no ABI mirror exist or are required for the entry. Its tests run in its own repository (section 4). |
+| Gate | `gate.py --cell <entry>` is refused: the verdict on the Cell is its owner's. Its membrane is an external include root of the Cells that depend on it. |
+| Packaging | `Cell.dependency_deliverables()` gives the product's packaging code the identity, the public header and the contract headers relative to the Cell root, the archive name and its path per core below a cross-build run, and the `LICENSE.md` (required) and `NOTICE.md` (when present) of the checkout root, so a product ships them under the dependency's own names. |
+| Writes | none below the checkout: every object, archive, `.def` file and record lies below the consumer's `90_temps/`. |
+
 Known open non-conformance: the maintainer tool configuration still requires
 absolute toolchain and system include locations (`compiler_bin_dir`,
 `toolchain_bin_dir`, `hosted_include_roots`). These locations are to move to
